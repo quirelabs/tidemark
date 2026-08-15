@@ -5,3 +5,8 @@ coverage/
 .DS_Store
 .tidemark/
 *.tidemark.json
+
+# The Action runs from a checkout that is never installed, so its bundle is the
+# one build output that has to be committed.
+!packages/action/dist/
+!packages/action/dist/**

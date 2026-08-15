@@ -11,11 +11,14 @@ import type {
 import { captureSchemaSnapshot } from "../schema/snapshot.ts";
 import type { SchemaSnapshot, TableSchema } from "../schema/types.ts";
 import {
-  columnList,
+  jsonValue,
   keyJoin,
+  needsTextCast,
   qualify,
   quoteIdent,
   rowDistinct,
+  selectList,
+  type SqlColumn,
 } from "./identifiers.ts";
 
 /**
@@ -61,7 +64,11 @@ export async function startSnapshotCapture(
   options: SnapshotCaptureOptions = {},
 ): Promise<SnapshotCaptureHandle> {
   const shadowSchema = options.shadowSchema ?? DEFAULT_SHADOW_SCHEMA;
-  const schemas = options.schemas ?? ["public"];
+  // The shadow schema must never be scanned, or its copies would surface as
+  // newly created tables the moment anyone captures more than one schema.
+  const schemas = (options.schemas ?? ["public"]).filter(
+    (s) => s !== shadowSchema,
+  );
 
   const schemaBefore = await captureSchemaSnapshot(sql, { schemas });
 
@@ -97,18 +104,15 @@ export async function stopSnapshotCapture(
     schemas: handle.schemas,
   });
 
+  // Keyed by oid, not by name. A table dropped and recreated under the same
+  // name is a different table, and a renamed table is the same one.
   const before = new Map(
-    capturableTables(handle.schemaBefore).map((t) => [tableKey(t), t]),
+    capturableTables(handle.schemaBefore).map((t) => [t.oid, t]),
   );
 
   const tables: TableDataDiff[] = [];
   for (const table of capturableTables(schemaAfter)) {
-    const diff = await diffTable(
-      sql,
-      handle,
-      table,
-      before.get(tableKey(table)) ?? null,
-    );
+    const diff = await diffTable(sql, handle, table, before.get(table.oid) ?? null);
     if (diff !== null) tables.push(diff);
   }
 
@@ -135,10 +139,6 @@ function capturableTables(snapshot: SchemaSnapshot): TableSchema[] {
   return snapshot.tables.filter((t) => !t.partitioned);
 }
 
-function tableKey(table: { schema: string; name: string }): string {
-  return `${table.schema}.${table.name}`;
-}
-
 /** Flat name so two schemas with the same table name cannot collide. */
 function shadowName(table: { schema: string; name: string }): string {
   return `${table.schema}.${table.name}`;
@@ -150,6 +150,29 @@ interface Counts {
   deleted: number;
 }
 
+/** A column present in both snapshots, with the SQL treatment it needs. */
+interface CommonColumn extends SqlColumn {
+  dataType: string;
+}
+
+function commonColumns(after: TableSchema, before: TableSchema): CommonColumn[] {
+  const beforeTypes = new Map(before.columns.map((c) => [c.name, c.dataType]));
+  const columns: CommonColumn[] = [];
+
+  for (const column of after.columns) {
+    const beforeType = beforeTypes.get(column.name);
+    if (beforeType === undefined) continue;
+    columns.push({
+      name: column.name,
+      dataType: column.dataType,
+      // A retyped column has no operator both sides can use, so compare as text.
+      castToText:
+        needsTextCast(column.dataType) || beforeType !== column.dataType,
+    });
+  }
+  return columns;
+}
+
 async function diffTable(
   sql: postgres.Sql,
   handle: SnapshotCaptureHandle,
@@ -157,52 +180,49 @@ async function diffTable(
   before: TableSchema | null,
 ): Promise<TableDataDiff | null> {
   const current = qualify(after.schema, after.name);
-  const columns = after.columns.map((c) => c.name);
 
-  // A table created during the capture window has no shadow copy, so every row
+  // No shadow copy means the table did not exist at capture start, so every row
   // in it is new.
-  if (before === null) {
-    return await diffNewTable(sql, handle, after, current, columns);
-  }
+  if (before === null) return await diffNewTable(sql, handle, after, current);
 
-  const shadow = qualify(handle.shadowSchema, shadowName(after));
-  const beforeColumns = new Set(before.columns.map((c) => c.name));
-  // Survives ADD COLUMN and DROP COLUMN: only compare what both sides have.
-  const common = columns.filter((c) => beforeColumns.has(c));
+  // Looked up by the name the table had at capture start, so a rename still
+  // finds its own copy.
+  const shadow = qualify(handle.shadowSchema, shadowName(before));
+  const common = commonColumns(after, before);
   const key = usableKey(after, common);
 
   const counts = await countChanges(sql, current, shadow, common, key);
   const total = counts.inserted + counts.updated + counts.deleted;
   if (total === 0) return null;
 
-  const diffColumns: DiffColumn[] = after.columns
-    .filter((c) => common.includes(c.name))
-    .map((c) => ({ name: c.name, dataType: c.dataType }));
+  const [countRow] = await sql.unsafe<{ count: string }[]>(
+    `select count(*)::text as count from ${shadow}`,
+  );
+
+  const base = {
+    schema: after.schema,
+    name: after.name,
+    primaryKey: key,
+    columns: common.map((c): DiffColumn => ({ name: c.name, dataType: c.dataType })),
+    counts,
+    rowsBefore: Number(countRow?.count ?? 0),
+  };
 
   if (total <= handle.rowThreshold) {
     return {
-      schema: after.schema,
-      name: after.name,
+      ...base,
       detail: "rows",
-      primaryKey: key,
-      columns: diffColumns,
-      counts,
       rows: await fetchRows(sql, current, shadow, common, key, handle.rowThreshold),
     };
   }
 
+  const stats =
+    key === null ? [] : await columnStats(sql, current, shadow, common, key);
   return {
-    schema: after.schema,
-    name: after.name,
+    ...base,
     detail: "aggregate",
-    primaryKey: key,
-    columns: diffColumns,
-    counts,
-    columnStats:
-      key === null
-        ? []
-        : await columnStats(sql, current, shadow, common, key),
-    sample: await fetchRows(sql, current, shadow, common, key, handle.sampleSize),
+    columnStats: stats,
+    sample: await fetchSample(sql, current, shadow, common, key, stats, handle.sampleSize),
   };
 }
 
@@ -211,71 +231,77 @@ async function diffNewTable(
   handle: SnapshotCaptureHandle,
   after: TableSchema,
   current: string,
-  columns: readonly string[],
 ): Promise<TableDataDiff | null> {
+  const columns: CommonColumn[] = after.columns.map((c) => ({
+    name: c.name,
+    dataType: c.dataType,
+    castToText: needsTextCast(c.dataType),
+  }));
+
   const [row] = await sql.unsafe<{ count: string }[]>(
     `select count(*)::text as count from ${current}`,
   );
   const inserted = Number(row?.count ?? 0);
   if (inserted === 0) return null;
 
-  const counts: Counts = { inserted, updated: 0, deleted: 0 };
-  const diffColumns: DiffColumn[] = after.columns.map((c) => ({
-    name: c.name,
-    dataType: c.dataType,
-  }));
   const key = usableKey(after, columns);
-  const limit = inserted <= handle.rowThreshold ? handle.rowThreshold : handle.sampleSize;
+  const withinThreshold = inserted <= handle.rowThreshold;
+  const limit = withinThreshold ? handle.rowThreshold : handle.sampleSize;
 
   const rows = await sql.unsafe<{ after: Record<string, CellValue> }[]>(
     `select to_jsonb(t) as after
-     from (select ${columnList("x", columns)} from ${current} x) t
+     from (select ${selectList("x", columns)} from ${current} x) t
      limit ${limit}`,
   );
   const changes = rows.map((r) => insertChange(r.after, columns, key));
 
-  if (inserted <= handle.rowThreshold) {
-    return {
-      schema: after.schema,
-      name: after.name,
-      detail: "rows",
-      primaryKey: key,
-      columns: diffColumns,
-      counts,
-      rows: changes,
-    };
-  }
-  return {
+  const base = {
     schema: after.schema,
     name: after.name,
-    detail: "aggregate",
     primaryKey: key,
-    columns: diffColumns,
-    counts,
-    columnStats: [],
-    sample: changes,
+    columns: after.columns.map((c): DiffColumn => ({
+      name: c.name,
+      dataType: c.dataType,
+    })),
+    counts: { inserted, updated: 0, deleted: 0 },
+    rowsBefore: 0,
   };
+
+  return withinThreshold
+    ? { ...base, detail: "rows", rows: changes }
+    : { ...base, detail: "aggregate", columnStats: [], sample: changes };
 }
 
 /** A primary key is only usable if every one of its columns still exists. */
-function usableKey(table: TableSchema, common: readonly string[]): string[] | null {
+function usableKey(
+  table: TableSchema,
+  common: readonly CommonColumn[],
+): string[] | null {
   const key = table.primaryKey;
   if (key === null) return null;
-  return key.every((c) => common.includes(c)) ? [...key] : null;
+  const names = new Set(common.map((c) => c.name));
+  return key.every((c) => names.has(c)) ? [...key] : null;
+}
+
+function nonKey(
+  common: readonly CommonColumn[],
+  key: readonly string[],
+): CommonColumn[] {
+  return common.filter((c) => !key.includes(c.name));
 }
 
 async function countChanges(
   sql: postgres.Sql,
   current: string,
   shadow: string,
-  common: readonly string[],
+  common: readonly CommonColumn[],
   key: readonly string[] | null,
 ): Promise<Counts> {
   if (key === null) return await countChangesWithoutKey(sql, current, shadow, common);
 
   const anchor = quoteIdent(key[0] as string);
   const join = keyJoin("c", "o", key);
-  const comparable = common.filter((c) => !key.includes(c));
+  const comparable = nonKey(common, key);
 
   const [row] = await sql.unsafe<
     { inserted: string; updated: string; deleted: string }[]
@@ -309,12 +335,12 @@ async function countChangesWithoutKey(
   sql: postgres.Sql,
   current: string,
   shadow: string,
-  common: readonly string[],
+  common: readonly CommonColumn[],
 ): Promise<Counts> {
   if (common.length === 0) return { inserted: 0, updated: 0, deleted: 0 };
 
-  const currentRows = `select ${columnList("c", common)} from ${current} c`;
-  const shadowRows = `select ${columnList("o", common)} from ${shadow} o`;
+  const currentRows = `select ${selectList("c", common)} from ${current} c`;
+  const shadowRows = `select ${selectList("o", common)} from ${shadow} o`;
 
   const [row] = await sql.unsafe<{ inserted: string; deleted: string }[]>(
     `select
@@ -338,7 +364,7 @@ async function fetchRows(
   sql: postgres.Sql,
   current: string,
   shadow: string,
-  common: readonly string[],
+  common: readonly CommonColumn[],
   key: readonly string[] | null,
   limit: number,
 ): Promise<RowChange[]> {
@@ -349,14 +375,13 @@ async function fetchRows(
   const anchor = quoteIdent(key[0] as string);
   const join = keyJoin("c", "o", key);
   const order = key.map((c) => `t.${quoteIdent(c)}`).join(", ");
-  const comparable = common.filter((c) => !key.includes(c));
+  const comparable = nonKey(common, key);
   const changes: RowChange[] = [];
 
   const inserted = await sql.unsafe<RowPair[]>(
     `select to_jsonb(t) as after from (
-       select ${columnList("c", common)} from ${current} c
+       select ${selectList("c", common)} from ${current} c
        left join ${shadow} o on ${join} where o.${anchor} is null
-       order by ${columnList("c", key)}
      ) t order by ${order} limit ${limit}`,
   );
   for (const row of inserted) {
@@ -364,27 +389,23 @@ async function fetchRows(
   }
 
   if (comparable.length > 0) {
-    const updated = await sql.unsafe<RowPair[]>(
-      `select to_jsonb(c) as after, to_jsonb(o) as before from (
-         select ${columnList("c", common)} from ${current} c
-         join ${shadow} o on ${join} where ${rowDistinct("c", "o", comparable)}
-         order by ${columnList("c", key)} limit ${limit}
-       ) c join (select ${columnList("o", common)} from ${shadow} o) o
-       on ${keyJoin("c", "o", key)}
-       order by ${columnList("c", key)}`,
-    );
-    for (const row of updated) {
-      if (row.before && row.after) {
-        changes.push(updateChange(row.before, row.after, common, key));
-      }
+    for (const row of await fetchUpdated(
+      sql,
+      current,
+      shadow,
+      common,
+      key,
+      `where ${rowDistinct("c", "o", comparable)}`,
+      limit,
+    )) {
+      changes.push(row);
     }
   }
 
   const deleted = await sql.unsafe<RowPair[]>(
     `select to_jsonb(t) as before from (
-       select ${columnList("o", common)} from ${shadow} o
+       select ${selectList("o", common)} from ${shadow} o
        left join ${current} c on ${join} where c.${anchor} is null
-       order by ${columnList("o", key)}
      ) t order by ${order} limit ${limit}`,
   );
   for (const row of deleted) {
@@ -394,17 +415,111 @@ async function fetchRows(
   return changes;
 }
 
+async function fetchUpdated(
+  sql: postgres.Sql,
+  current: string,
+  shadow: string,
+  common: readonly CommonColumn[],
+  key: readonly string[],
+  predicate: string,
+  limit: number,
+): Promise<RowChange[]> {
+  const join = keyJoin("c", "o", key);
+  const rows = await sql.unsafe<RowPair[]>(
+    `select to_jsonb(c) as after, to_jsonb(o) as before from (
+       select ${selectList("c", common)} from ${current} c
+       join ${shadow} o on ${join} ${predicate}
+       order by ${key.map((k) => `c.${quoteIdent(k)}`).join(", ")} limit ${limit}
+     ) c join (select ${selectList("o", common)} from ${shadow} o) o
+     on ${join}
+     order by ${key.map((k) => `c.${quoteIdent(k)}`).join(", ")}`,
+  );
+
+  const changes: RowChange[] = [];
+  for (const row of rows) {
+    if (row.before && row.after) {
+      changes.push(updateChange(row.before, row.after, common, key));
+    }
+  }
+  return changes;
+}
+
+/**
+ * Stratified rather than the first N by key. A uniform bulk update would
+ * otherwise produce ten identical lines, which tells a reviewer nothing about
+ * the shape of the change.
+ */
+async function fetchSample(
+  sql: postgres.Sql,
+  current: string,
+  shadow: string,
+  common: readonly CommonColumn[],
+  key: readonly string[] | null,
+  stats: readonly ColumnChangeStat[],
+  size: number,
+): Promise<RowChange[]> {
+  if (key === null) {
+    return await fetchRowsWithoutKey(sql, current, shadow, common, size);
+  }
+
+  const byName = new Map(common.map((c) => [c.name, c]));
+  const shapes = stats.flatMap((stat) => {
+    const column = byName.get(stat.column);
+    return column === undefined
+      ? []
+      : stat.transitions.map((t) => ({ column, transition: t }));
+  });
+
+  if (shapes.length === 0) {
+    return await fetchRows(sql, current, shadow, common, key, size);
+  }
+
+  // One row per distinct transition first, then top up from anything changed.
+  const perShape = Math.max(1, Math.floor(size / shapes.length));
+  const seen = new Set<string>();
+  const changes: RowChange[] = [];
+
+  for (const shape of shapes) {
+    if (changes.length >= size) break;
+    const rows = await fetchUpdated(
+      sql,
+      current,
+      shadow,
+      common,
+      key,
+      `where ${jsonValue("o", shape.column)} = ${literalJson(shape.transition.before)}
+         and ${jsonValue("c", shape.column)} = ${literalJson(shape.transition.after)}`,
+      perShape,
+    );
+    for (const row of rows) {
+      const id = JSON.stringify(row.key);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      changes.push(row);
+    }
+  }
+  return changes.slice(0, size);
+}
+
+function literalJson(value: CellValue): string {
+  return `${quoteJson(JSON.stringify(value ?? null))}::jsonb`;
+}
+
+function quoteJson(text: string): string {
+  return `'${text.replaceAll("'", "''")}'`;
+}
+
 async function fetchRowsWithoutKey(
   sql: postgres.Sql,
   current: string,
   shadow: string,
-  common: readonly string[],
+  common: readonly CommonColumn[],
   limit: number,
 ): Promise<RowChange[]> {
   if (common.length === 0) return [];
 
-  const currentRows = `select ${columnList("c", common)} from ${current} c`;
-  const shadowRows = `select ${columnList("o", common)} from ${shadow} o`;
+  const currentRows = `select ${selectList("c", common)} from ${current} c`;
+  const shadowRows = `select ${selectList("o", common)} from ${shadow} o`;
   const changes: RowChange[] = [];
 
   const inserted = await sql.unsafe<RowPair[]>(
@@ -428,10 +543,10 @@ async function columnStats(
   sql: postgres.Sql,
   current: string,
   shadow: string,
-  common: readonly string[],
+  common: readonly CommonColumn[],
   key: readonly string[],
 ): Promise<ColumnChangeStat[]> {
-  const comparable = common.filter((c) => !key.includes(c));
+  const comparable = nonKey(common, key);
   if (comparable.length === 0) return [];
 
   const join = keyJoin("c", "o", key);
@@ -439,7 +554,7 @@ async function columnStats(
     `select ${comparable
       .map(
         (c, i) =>
-          `count(*) filter (where c.${quoteIdent(c)} is distinct from o.${quoteIdent(c)})::text as ${quoteIdent(`col_${i}`)}`,
+          `count(*) filter (where ${rowDistinct("c", "o", [c])})::text as ${quoteIdent(`col_${i}`)}`,
       )
       .join(", ")}
      from ${current} c join ${shadow} o on ${join}`,
@@ -453,11 +568,11 @@ async function columnStats(
     const rows = await sql.unsafe<
       { before: CellValue; after: CellValue; count: string }[]
     >(
-      `select to_jsonb(o.${quoteIdent(column)}) as before,
-              to_jsonb(c.${quoteIdent(column)}) as after,
+      `select ${jsonValue("o", column)} as before,
+              ${jsonValue("c", column)} as after,
               count(*)::text as count
        from ${current} c join ${shadow} o on ${join}
-       where c.${quoteIdent(column)} is distinct from o.${quoteIdent(column)}
+       where ${rowDistinct("c", "o", [column])}
        group by 1, 2
        order by count(*) desc, 1, 2
        limit ${MAX_TRANSITIONS + 1}`,
@@ -465,12 +580,12 @@ async function columnStats(
 
     if (rows.length > MAX_TRANSITIONS) {
       const [distinct] = await sql.unsafe<{ count: string }[]>(
-        `select count(distinct c.${quoteIdent(column)})::text as count
+        `select count(distinct ${jsonValue("c", column)})::text as count
          from ${current} c join ${shadow} o on ${join}
-         where c.${quoteIdent(column)} is distinct from o.${quoteIdent(column)}`,
+         where ${rowDistinct("c", "o", [column])}`,
       );
       stats.push({
-        column,
+        column: column.name,
         changed,
         transitions: [],
         distinctAfter: Number(distinct?.count ?? 0),
@@ -478,12 +593,17 @@ async function columnStats(
       continue;
     }
 
-    const transitions: ValueTransition[] = rows.map((r) => ({
-      before: r.before,
-      after: r.after,
-      count: Number(r.count),
-    }));
-    stats.push({ column, changed, transitions });
+    stats.push({
+      column: column.name,
+      changed,
+      transitions: rows.map(
+        (r): ValueTransition => ({
+          before: r.before,
+          after: r.after,
+          count: Number(r.count),
+        }),
+      ),
+    });
   }
   return stats;
 }
@@ -497,46 +617,46 @@ function keyValues(
 
 function insertChange(
   after: Record<string, CellValue>,
-  columns: readonly string[],
+  columns: readonly CommonColumn[],
   key: readonly string[] | null,
 ): RowChange {
   return {
     op: "insert",
     key: keyValues(after, key),
     cells: columns
-      .filter((c) => key === null || !key.includes(c))
-      .map((column): CellChange => ({ column, after: after[column] ?? null })),
+      .filter((c) => key === null || !key.includes(c.name))
+      .map((c): CellChange => ({ column: c.name, after: after[c.name] ?? null })),
   };
 }
 
 function deleteChange(
   before: Record<string, CellValue>,
-  columns: readonly string[],
+  columns: readonly CommonColumn[],
   key: readonly string[] | null,
 ): RowChange {
   return {
     op: "delete",
     key: keyValues(before, key),
     cells: columns
-      .filter((c) => key === null || !key.includes(c))
-      .map((column): CellChange => ({ column, before: before[column] ?? null })),
+      .filter((c) => key === null || !key.includes(c.name))
+      .map((c): CellChange => ({ column: c.name, before: before[c.name] ?? null })),
   };
 }
 
 function updateChange(
   before: Record<string, CellValue>,
   after: Record<string, CellValue>,
-  columns: readonly string[],
+  columns: readonly CommonColumn[],
   key: readonly string[],
 ): RowChange {
   // Only the columns that actually moved. A 40 column table with one changed
   // field should render as one changed field.
   const cells: CellChange[] = [];
   for (const column of columns) {
-    if (key.includes(column)) continue;
-    const from = before[column] ?? null;
-    const to = after[column] ?? null;
-    if (!sameValue(from, to)) cells.push({ column, before: from, after: to });
+    if (key.includes(column.name)) continue;
+    const from = before[column.name] ?? null;
+    const to = after[column.name] ?? null;
+    if (!sameValue(from, to)) cells.push({ column: column.name, before: from, after: to });
   }
   return { op: "update", key: keyValues(after, key), cells };
 }

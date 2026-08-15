@@ -1,6 +1,6 @@
 import type { CellChange, CellValue, DiffColumn } from "@quirelabs/tidemark-core";
 import { renderValue } from "../value/render.ts";
-import type { GlyphMode } from "../value/types.ts";
+import type { GlyphMode, RenderedValue } from "../value/types.ts";
 import { span, type Span, type StyleName } from "../style/style.ts";
 
 const VALUE_STYLES: Readonly<Record<string, StyleName>> = {
@@ -29,21 +29,37 @@ const REDACTION_LABELS = {
   truncate: "[truncated]",
 } as const;
 
+/**
+ * Every backend renders values through here, so the terminal and markdown can
+ * never disagree about what a value looks like or whether it is hostile.
+ */
+export function renderCellValue(
+  value: CellValue | undefined,
+  column: string,
+  context: CellContext,
+): RenderedValue {
+  const dataType = context.columns.find((c) => c.name === column)?.dataType;
+  return renderValue(value ?? null, {
+    maxWidth: context.maxWidth,
+    glyphs: context.glyphs,
+    numericColumn: dataType !== undefined && NUMBER_TYPES.test(dataType),
+  });
+}
+
 export function valueSpan(
   value: CellValue | undefined,
   column: string,
   context: CellContext,
+  forceStyle?: StyleName,
 ): Span {
-  const rendered = renderValue(value ?? null, {
-    maxWidth: context.maxWidth,
-    glyphs: context.glyphs,
-  });
+  const dataType = context.columns.find((c) => c.name === column)?.dataType;
+  const rendered = renderCellValue(value, column, context);
 
   // A value carrying deceptive characters is the point of the whole exercise,
   // so it never inherits the quiet styling of its type.
   if (rendered.hazards.length > 0) return span(rendered.text, "hazard");
+  if (forceStyle !== undefined) return span(rendered.text, forceStyle);
 
-  const dataType = context.columns.find((c) => c.name === column)?.dataType;
   if (dataType !== undefined && rendered.kind === "string") {
     if (DATE_TYPES.test(dataType)) return span(rendered.text, "value_date");
     if (NUMBER_TYPES.test(dataType)) return span(rendered.text, "value_number");
@@ -68,13 +84,18 @@ export function cellSpans(
   context: CellContext,
   arrow: string,
 ): Span[] {
-  if (cell.redacted !== undefined) {
+  // A masked value is gone, so there is nothing to render but the fact of it.
+  // Hash and truncate leave something readable, which still renders as a value
+  // so a reviewer can see whether it changed, only styled as withheld.
+  if (cell.redacted === "mask") {
     return [
       span(cell.column),
       span("="),
-      span(REDACTION_LABELS[cell.redacted], "redacted"),
+      span(REDACTION_LABELS.mask, "redacted"),
     ];
   }
+  const style: StyleName | undefined =
+    cell.redacted === undefined ? undefined : "redacted";
 
   const hasBefore = cell.before !== undefined;
   const hasAfter = cell.after !== undefined;
@@ -83,12 +104,16 @@ export function cellSpans(
     return [
       span(cell.column),
       span(" "),
-      valueSpan(cell.before, cell.column, context),
+      valueSpan(cell.before, cell.column, context, style),
       span(` ${arrow} `),
-      valueSpan(cell.after, cell.column, context),
+      valueSpan(cell.after, cell.column, context, style),
     ];
   }
 
   const value = hasAfter ? cell.after : cell.before;
-  return [span(cell.column), span("="), valueSpan(value, cell.column, context)];
+  return [
+    span(cell.column),
+    span("="),
+    valueSpan(value, cell.column, context, style),
+  ];
 }

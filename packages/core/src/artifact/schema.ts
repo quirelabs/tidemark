@@ -58,6 +58,8 @@ export interface SchemaDiff {
 }
 
 export interface AlteredTable extends TableRef {
+  /** Set when the table kept its identity but changed name. */
+  renamedFrom?: TableRef;
   columnsAdded: ColumnDefinition[];
   columnsRemoved: ColumnDefinition[];
   columnsAltered: AlteredColumn[];
@@ -105,6 +107,12 @@ interface TableDataDiffBase extends TableRef {
   /** Column types for the columns that appear in this diff. */
   columns: DiffColumn[];
   counts: RowCounts;
+  /**
+   * Rows in the table when capture started. Without it a classifier cannot tell
+   * "every row was updated" from "some rows were updated", which is the whole
+   * difference between an UPDATE with and without a WHERE clause.
+   */
+  rowsBefore: number;
 }
 
 export interface DiffColumn {

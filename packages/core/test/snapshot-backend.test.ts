@@ -373,6 +373,107 @@ describe.skipIf(!dockerAvailable())("snapshot backend", () => {
     expect(() => JSON.stringify(row)).not.toThrow();
   });
 
+  it("treats a dropped and recreated table as a new table, not the old one", async () => {
+    await seedUsers();
+    const result = await capture(`
+      drop table users;
+      create table users (id int primary key, email text not null, tier text not null default 'free', visits int not null default 0);
+      insert into users (id, email) values (1, 'someone-else@example.com');
+    `);
+
+    // Matching by name would diff the new row against the old table and report
+    // one update. Matching by oid reports the truth: a different table.
+    const diff = rowsOf(find(result.tables, "users"));
+    expect(diff.counts).toEqual({ inserted: 1, updated: 0, deleted: 0 });
+    expect(diff.rowsBefore).toBe(0);
+  });
+
+  it("follows a renamed table, which keeps its oid", async () => {
+    await seedUsers();
+    const result = await capture(`
+      alter table users rename to accounts;
+      update accounts set tier = 'pro' where id = 1;
+    `);
+
+    const diff = rowsOf(find(result.tables, "accounts"));
+    expect(diff.counts).toEqual({ inserted: 0, updated: 1, deleted: 0 });
+    expect(diff.rows[0]?.cells).toEqual([
+      { column: "tier", before: "free", after: "pro" },
+    ]);
+  });
+
+  it("preserves bigint precision beyond what a JS number holds", async () => {
+    await sql.unsafe(`
+      create table ledger (id bigint primary key, amount numeric(20,4) not null);
+      insert into ledger values (9007199254740993, 0);
+    `);
+
+    const result = await capture(
+      "update ledger set amount = 12345678901234.5678 where id = 9007199254740993",
+    );
+    const diff = rowsOf(find(result.tables, "ledger"));
+
+    // 9007199254740993 is 2^53 + 1, which a JS number rounds to ...992.
+    expect(diff.rows[0]?.key).toEqual(["9007199254740993"]);
+    expect(diff.rows[0]?.cells).toEqual([
+      { column: "amount", before: "0.0000", after: "12345678901234.5678" },
+    ]);
+  });
+
+  it("compares a retyped column as text rather than failing", async () => {
+    await sql.unsafe(`
+      create table items (id int primary key, code int not null);
+      insert into items values (1, 42), (2, 7);
+    `);
+
+    const result = await capture(`
+      alter table items alter column code type text;
+      update items set code = '99' where id = 2;
+    `);
+
+    const diff = rowsOf(find(result.tables, "items"));
+    expect(diff.counts).toEqual({ inserted: 0, updated: 1, deleted: 0 });
+    expect(diff.rows[0]?.key).toEqual([2]);
+    expect(diff.rows[0]?.cells).toEqual([
+      { column: "code", before: "7", after: "99" },
+    ]);
+  });
+
+  it("samples across the shapes of a bulk change, not the first rows by key", async () => {
+    await sql.unsafe(`
+      create table orders (id int primary key, status text not null);
+      insert into orders (id, status)
+      select g, case when g % 3 = 0 then 'failed' else 'pending' end
+      from generate_series(1, 600) g;
+    `);
+
+    const result = await capture(
+      "update orders set status = case when status = 'failed' then 'refunded' else 'processed' end",
+    );
+    const diff = aggregateOf(find(result.tables, "orders"));
+
+    const shapes = new Set(
+      diff.sample.map((row) =>
+        row.cells.map((c) => `${String(c.before)}->${String(c.after)}`).join(","),
+      ),
+    );
+    // Taking the first N by id would return only pending -> processed.
+    expect(shapes).toContain("pending->processed");
+    expect(shapes).toContain("failed->refunded");
+  });
+
+  it("never captures its own shadow schema", async () => {
+    await seedUsers();
+    const handle = await startSnapshotCapture(sql, {
+      schemas: ["public", "tidemark_snapshot"],
+    });
+    await sql.unsafe("insert into users (id, email) values (4, 'dan@example.com')");
+    const result = await stopSnapshotCapture(sql, handle);
+
+    expect(handle.schemas).not.toContain("tidemark_snapshot");
+    expect(result.tables.map((t) => t.schema)).toEqual(["public"]);
+  });
+
   it("tracks more than one table in a single capture", async () => {
     await seedUsers();
     await sql.unsafe(`

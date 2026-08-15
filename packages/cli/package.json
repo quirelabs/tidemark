@@ -28,7 +28,9 @@
     "@types/node": "^26.2.0",
     "tsup": "^8.5.1",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "@testcontainers/postgresql": "^12.1.0",
+    "@quirelabs/tidemark-render": "workspace:*"
   },
   "keywords": [
     "postgres",

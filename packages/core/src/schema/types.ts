@@ -16,6 +16,13 @@ export interface SchemaSnapshot {
 }
 
 export interface TableSchema {
+  /**
+   * pg_class.oid, as text because an oid can exceed a signed 32 bit int. This
+   * is the table's identity across snapshots: a table dropped and recreated
+   * under the same name gets a new oid, so its rows are never diffed against
+   * the table it replaced.
+   */
+  oid: string;
   schema: string;
   name: string;
   /** True for partitioned parents, which have no storage of their own. */

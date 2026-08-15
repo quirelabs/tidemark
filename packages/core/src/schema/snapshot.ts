@@ -18,6 +18,7 @@ const DEFAULT_SCHEMAS = ["public"];
 // classes, and a schema diff that drops detail is worse than no schema diff.
 
 interface TableRow {
+  oid: string;
   schema_name: string;
   table_name: string;
   partitioned: boolean;
@@ -94,7 +95,8 @@ export async function captureSchemaSnapshot(
   const schemas = options.schemas ?? DEFAULT_SCHEMAS;
 
   const tables = await sql<TableRow[]>`
-    select n.nspname as schema_name,
+    select c.oid::text as oid,
+           n.nspname as schema_name,
            c.relname as table_name,
            c.relkind = 'p' as partitioned,
            c.relreplident as replica_identity
@@ -205,6 +207,7 @@ function buildTable(
   const primary = constraints.find((c) => c.type === "primary_key");
 
   return {
+    oid: table.oid,
     schema: table.schema_name,
     name: table.table_name,
     partitioned: table.partitioned,

@@ -1,10 +1,49 @@
-import type { GlyphMode, Hazard, HazardType } from "./types.ts";
+/**
+ * Tidemark reports values that an AI agent may have written seconds earlier,
+ * into a terminal and into a frequently public pull request comment. Those bytes
+ * are untrusted input, not text. A value that can move the cursor, hide a line,
+ * reverse a string or render as another string can forge the very review the
+ * tool exists to provide.
+ *
+ * Whether a value contains such characters is a fact about the data, which is
+ * why detection lives here rather than in the renderer: the artifact has to be
+ * able to say an attack was found, or the GitHub Action and any fail-on rule are
+ * blind to it.
+ */
+
+export type HazardType =
+  /** ESC, the entry point for cursor movement, screen clears and hidden text. */
+  | "ansi_escape"
+  /** Other C0/C1 controls, including NUL, BEL and DEL. */
+  | "control_char"
+  /** CR or LF, which can forge extra rows or warning lines. */
+  | "line_break"
+  /** Bidi overrides and isolates, the Trojan Source class. */
+  | "bidi_control"
+  /** Zero width characters, which make distinct values look identical. */
+  | "zero_width"
+  /** Private use area, where a patched font can draw anything at all. */
+  | "private_use"
+  /** Lone surrogate, which is not valid text and breaks naive consumers. */
+  | "unpaired_surrogate";
+
+export interface Hazard {
+  type: HazardType;
+  /** How many code points of this class were found. */
+  count: number;
+}
 
 /**
- * Turns arbitrary text into text that cannot alter its surroundings, revealing
- * what it removed rather than silently stripping it. Stripping would be worse
- * than useless here: it hides the evidence that something tried to deceive.
+ * "unicode" reveals controls with the Control Pictures block, which reads better
+ * in a terminal. "ascii" uses escapes like \n, for fonts and pipes that cannot
+ * be trusted with U+24xx.
  */
+export type GlyphMode = "unicode" | "ascii";
+
+export interface SafeText {
+  text: string;
+  hazards: Hazard[];
+}
 
 const BIDI_NAMES: Readonly<Record<number, string>> = {
   0x200e: "LRM",
@@ -55,11 +94,11 @@ function isPrivateUse(codePoint: number): boolean {
   );
 }
 
-export interface SafeText {
-  text: string;
-  hazards: Hazard[];
-}
-
+/**
+ * Turns arbitrary text into text that cannot alter its surroundings, revealing
+ * what it removed rather than silently stripping it. Stripping would be worse
+ * than useless here: it hides the evidence that something tried to deceive.
+ */
 export function makeDisplaySafe(
   input: string,
   glyphs: GlyphMode = "unicode",
@@ -141,6 +180,11 @@ export function makeDisplaySafe(
     text: out,
     hazards: [...counts].map(([type, count]) => ({ type, count })),
   };
+}
+
+/** Detection only, for the classifier. Same scan, without building the text. */
+export function scanHazards(input: string): Hazard[] {
+  return makeDisplaySafe(input).hazards;
 }
 
 /** U+2400 Control Pictures maps C0 one to one, and U+2421 covers DEL. */

@@ -24,5 +24,16 @@ jobs:
 
       - run: pnpm typecheck
 
+      # Before the tests, because the action bundle is itself under test.
+      - run: pnpm build
+
       # Ubuntu runners ship a running Docker daemon, so testcontainers needs no setup.
       - run: pnpm test
+
+      # The only check that drives capture, diff, redaction, render and the
+      # Action in one process, so it catches regressions in the seams.
+      - run: pnpm e2e
+
+      # The bundle is committed, so a stale one is a real bug.
+      - name: Check the committed action bundle is up to date
+        run: git diff --exit-code -- packages/action/dist

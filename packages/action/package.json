@@ -2,12 +2,27 @@
   "name": "tidemark-action",
   "version": "0.0.1",
   "private": true,
-  "description": "GitHub Action wrapper for Tidemark. Runs a capture around a user command and posts the diff as a sticky PR comment. Implemented in Phase 4.",
+  "description": "GitHub Action wrapper for Tidemark. Runs a capture around a command and posts the diff as a sticky pull request comment.",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
-    "build": "echo \"action: not implemented until phase 4\"",
-    "test": "echo \"action: no tests until phase 4\"",
-    "typecheck": "echo \"action: nothing to typecheck yet\""
+    "build": "tsup",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@quirelabs/tidemark-core": "workspace:*",
+    "@quirelabs/tidemark-render": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsup": "^8.5.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "main": "./src/main.ts",
+  "types": "./src/main.ts",
+  "exports": {
+    ".": "./src/main.ts"
   }
 }

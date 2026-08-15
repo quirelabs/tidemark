@@ -10,6 +10,7 @@ import type {
   TableRef,
   Warning,
 } from "@quirelabs/tidemark-core";
+import { isNotablePii } from "@quirelabs/tidemark-core";
 import type { Capabilities } from "../style/capabilities.ts";
 import { lineWidth, pad, span, type Line, type Span } from "../style/style.ts";
 import { stringWidth } from "../text/width.ts";
@@ -515,20 +516,53 @@ function keySpans(
   return spans;
 }
 
+/**
+ * Tidemark shows values by default and masks only what looks like a credential,
+ * so every report states what it left visible. A one time notice would be read
+ * by whoever ran the install; the person who needs it is the reviewer reading
+ * this diff weeks later, who never saw that notice.
+ */
 function footer(artifact: Artifact, glyphs: Glyphs): Line[] {
-  const { redactions } = artifact.meta;
-  if (redactions.length === 0) return [];
+  if (artifact.tables.length === 0) return [];
 
-  const described = redactions
-    .map((r) => `${ref(r.table)}.${r.column} (${r.mode})`)
-    .join(", ");
-  return [
-    [],
-    [
-      span(`${NUMBER.format(redactions.length)} ${plural(redactions.length, "column")} redacted`, "muted"),
-      span(`: ${described}`, "muted"),
-    ],
-  ];
+  const { redactions } = artifact.meta;
+  const redactedKeys = new Set(
+    redactions.map((r) => `${ref(r.table)}.${r.column}`),
+  );
+
+  const shown: string[] = [];
+  for (const table of artifact.tables) {
+    for (const column of table.columns) {
+      if (redactedKeys.has(`${ref(table)}.${column.name}`)) continue;
+      shown.push(column.name);
+    }
+  }
+
+  const notable = [...new Set(shown.filter(isNotablePii))].sort();
+  const lines: Line[] = [[]];
+
+  const disclosure =
+    `values shown in full for ${NUMBER.format(shown.length)} ` +
+    `${plural(shown.length, "column")}` +
+    (notable.length > 0 ? `, including ${notable.join(", ")}` : "");
+  lines.push([span(disclosure, notable.length > 0 ? "caution" : "muted")]);
+
+  if (redactions.length > 0) {
+    const described = redactions
+      .map((r) => `${ref(r.table)}.${r.column} (${r.mode})`)
+      .join(", ");
+    lines.push([
+      span(
+        `${NUMBER.format(redactions.length)} ${plural(redactions.length, "column")} redacted: ${described}`,
+        "muted",
+      ),
+    ]);
+  }
+
+  lines.push([
+    span(`${glyphs.separator} configure masking in tidemark.config.ts`, "muted"),
+  ]);
+  return lines;
 }
 
 function totals(artifact: Artifact) {

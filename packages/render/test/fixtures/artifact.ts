@@ -97,6 +97,7 @@ export const AGENT_GONE_WRONG: Artifact = {
         { name: "updated_at", dataType: "timestamp with time zone" },
       ],
       counts: { inserted: 0, updated: 14203, deleted: 0 },
+      rowsBefore: 14203,
       columnStats: [
         {
           column: "status",
@@ -139,6 +140,7 @@ export const AGENT_GONE_WRONG: Artifact = {
         { name: "password_hash", dataType: "text" },
       ],
       counts: { inserted: 2, updated: 1, deleted: 1 },
+      rowsBefore: 3,
       rows: [
         {
           op: "insert",

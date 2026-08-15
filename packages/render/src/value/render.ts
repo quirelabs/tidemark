@@ -1,5 +1,5 @@
 import { stringWidth, truncateToWidth } from "../text/width.ts";
-import { makeDisplaySafe } from "./safe-text.ts";
+import { makeDisplaySafe } from "@quirelabs/tidemark-core";
 import type {
   GlyphMode,
   RenderedValue,
@@ -27,15 +27,24 @@ export function renderValue(
   const maxWidth = options.maxWidth ?? Number.POSITIVE_INFINITY;
   const ellipsis = glyphs === "ascii" ? "..." : "…";
 
-  const { kind, raw, quotable } = classify(value);
+  const classified = classify(value);
+  const { raw, quotable } = classified;
   const safe = makeDisplaySafe(raw, glyphs);
+
+  // An exact numeric arrives as a string to preserve precision, so for those
+  // columns "looks like a number" is not ambiguity, it is the truth.
+  const numericString =
+    options.numericColumn === true &&
+    classified.kind === "string" &&
+    NUMERIC_LOOKING.test(raw);
+  const kind: ValueKind = numericString ? "number" : classified.kind;
 
   const quoted =
     quotable &&
     (raw.length === 0 ||
       raw !== raw.trim() ||
       SENTINEL_LOOKING.test(raw) ||
-      NUMERIC_LOOKING.test(raw) ||
+      (NUMERIC_LOOKING.test(raw) && !numericString) ||
       safe.hazards.length > 0);
 
   const budget = quoted ? maxWidth - 2 : maxWidth;

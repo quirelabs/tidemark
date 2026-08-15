@@ -1,0 +1,49 @@
+name: Tidemark
+description: Capture what a migration or agent actually did to your Postgres database and post it as a reviewable diff.
+author: Quire Labs
+
+branding:
+  icon: activity
+  color: blue
+
+inputs:
+  connection:
+    description: Postgres connection string. Falls back to DATABASE_URL.
+    required: false
+  run:
+    description: >
+      Shell script to run between the baseline and the diff, for example your
+      migration command. Treat this exactly like a `run:` step: it is executed by
+      a shell, so never interpolate untrusted event data such as a pull request
+      title or branch name into it. Pass those through `env:` instead.
+    required: false
+  config:
+    description: Path to a tidemark config file. Defaults to the nearest tidemark.config.ts.
+    required: false
+  fail-on:
+    description: none, warnings or danger. Fails the check when the threshold is met.
+    required: false
+    default: none
+  comment:
+    description: Post or update the sticky pull request comment.
+    required: false
+    default: "true"
+  working-directory:
+    description: Directory to run in.
+    required: false
+  github-token:
+    description: Token used to post the comment. Needs pull-requests write.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  warnings:
+    description: Total number of warnings found.
+  dangers:
+    description: Number of warnings at danger severity.
+  tables:
+    description: Number of tables with data changes.
+
+runs:
+  using: node24
+  main: packages/action/dist/main.js
