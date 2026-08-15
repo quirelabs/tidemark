@@ -1,0 +1,49 @@
+# Demonstrates Tidemark reviewing its own example migration, and is how the
+# pull request comment path gets exercised against the real GitHub API.
+name: Database review (demo)
+
+on:
+  pull_request:
+    paths:
+      - "examples/demo-app/**"
+      - ".github/workflows/demo-review.yml"
+      - "packages/action/dist/**"
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: shop_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Seed the shop
+        run: psql "$DATABASE_URL" -q -f examples/demo-app/sql/schema.sql
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/shop_ci
+
+      # Uses the action from this checkout rather than a tag, so the PR tests
+      # exactly the bundle it carries.
+      - name: Review what the migration did
+        uses: ./
+        with:
+          connection: postgres://postgres:postgres@localhost:5432/shop_ci
+          working-directory: examples/demo-app
+          run: psql "$DATABASE_URL" -q -f sql/agent-migration.sql
+          fail-on: none
+          github-token: ${{ secrets.GITHUB_TOKEN }}
