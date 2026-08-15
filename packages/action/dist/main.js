@@ -4020,10 +4020,13 @@ function exitFor(artifact, failOn) {
   const relevant = failOn === "danger" ? artifact.warnings.filter((w) => w.severity === "danger") : artifact.warnings;
   return relevant.length > 0 ? EXIT_THRESHOLD : EXIT_OK;
 }
-export {
-  EXIT_ERROR,
-  EXIT_OK,
-  EXIT_THRESHOLD,
-  exitFor,
-  main
-};
+
+// src/entry.ts
+try {
+  process.exitCode = await main();
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  process.stderr.write(`::error::tidemark: ${message}
+`);
+  process.exitCode = EXIT_ERROR;
+}

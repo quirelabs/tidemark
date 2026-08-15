@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -51,6 +52,37 @@ describe("action bundle", () => {
   it("never shells out to the CLI, which would not resolve", async () => {
     const source = await bundle();
     expect(source).not.toContain("cli/src/cli.ts");
+  });
+
+  /**
+   * Inspecting the bundle cannot tell you whether it runs. A bundle that only
+   * defines and exports its functions exits zero having done nothing, which on a
+   * runner is indistinguishable from success: a green step and no output.
+   *
+   * So this executes it. With no inputs it must fail on the missing connection,
+   * which is only reachable if the entry point actually fired.
+   */
+  it("runs when executed, rather than only defining functions", async () => {
+    await bundle();
+
+    const result = await new Promise<{ code: number; stderr: string }>(
+      (resolve, reject) => {
+        const child = spawn(process.execPath, [bundlePath], {
+          // A bare environment, so no stray DATABASE_URL satisfies the input.
+          env: { PATH: process.env["PATH"] ?? "" },
+          stdio: ["ignore", "ignore", "pipe"],
+        });
+        let stderr = "";
+        child.stderr.on("data", (chunk: Buffer) => {
+          stderr += chunk.toString("utf8");
+        });
+        child.on("error", reject);
+        child.on("close", (code) => resolve({ code: code ?? -1, stderr }));
+      },
+    );
+
+    expect(result.stderr).toMatch(/connection/i);
+    expect(result.code).not.toBe(0);
   });
 });
 
