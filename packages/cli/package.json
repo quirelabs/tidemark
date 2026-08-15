@@ -1,0 +1,43 @@
+{
+  "name": "@quirelabs/tidemark",
+  "version": "0.0.1",
+  "description": "Tidemark CLI. Capture database mutations on a branch or CI Postgres and render them as a reviewable semantic state diff.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "bin": {
+    "tidemark": "./src/cli.ts"
+  },
+  "publishConfig": {
+    "bin": {
+      "tidemark": "./dist/cli.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@quirelabs/tidemark-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsup": "^8.5.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "keywords": [
+    "postgres",
+    "diff",
+    "cli",
+    "database",
+    "migration",
+    "ai",
+    "agent",
+    "ci"
+  ]
+}

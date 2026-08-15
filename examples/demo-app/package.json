@@ -1,0 +1,12 @@
+{
+  "name": "tidemark-demo-app",
+  "version": "0.0.1",
+  "private": true,
+  "description": "End-to-end fixture for Tidemark and the launch demo. A small schema plus a scripted agent-gone-wrong migration.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "e2e": "echo \"demo-app: e2e lands with phase 4\"",
+    "typecheck": "echo \"demo-app: nothing to typecheck yet\""
+  }
+}

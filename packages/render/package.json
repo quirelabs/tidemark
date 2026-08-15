@@ -1,0 +1,27 @@
+{
+  "name": "@quirelabs/tidemark-render",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Rendering layer for Tidemark. Treats every value it renders as hostile input. Internal for now, kept free of Tidemark specifics so it can be published on its own later.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "echo \"render: source only, bundled by consumers\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@quirelabs/tidemark-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

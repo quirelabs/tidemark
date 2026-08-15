@@ -1,0 +1,13 @@
+{
+  "name": "tidemark-action",
+  "version": "0.0.1",
+  "private": true,
+  "description": "GitHub Action wrapper for Tidemark. Runs a capture around a user command and posts the diff as a sticky PR comment. Implemented in Phase 4.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "echo \"action: not implemented until phase 4\"",
+    "test": "echo \"action: no tests until phase 4\"",
+    "typecheck": "echo \"action: nothing to typecheck yet\""
+  }
+}
