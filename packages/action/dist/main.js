@@ -1228,7 +1228,7 @@ function captureOptionsFrom(config) {
 
 // ../core/src/version.ts
 var MIN_POSTGRES_MAJOR = 15;
-var TIDEMARK_VERSION = "0.0.1";
+var TIDEMARK_VERSION = "0.0.2";
 
 // ../../node_modules/.pnpm/postgres@3.4.9/node_modules/postgres/src/index.js
 import os from "os";

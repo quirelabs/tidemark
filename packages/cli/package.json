@@ -1,6 +1,6 @@
 {
   "name": "@quirelabs/tidemark",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Tidemark CLI. Capture database mutations on a branch or CI Postgres and render them as a reviewable semantic state diff.",
   "license": "Apache-2.0",
   "type": "module",

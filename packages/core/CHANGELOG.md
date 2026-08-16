@@ -1,5 +1,11 @@
 # @quirelabs/tidemark-core
 
+## 0.0.2
+
+### Patch Changes
+
+- Add an interactive terminal browser for the diff
+
 ## 0.0.1
 
 First release.

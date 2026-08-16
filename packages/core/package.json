@@ -1,6 +1,6 @@
 {
   "name": "@quirelabs/tidemark-core",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Capture backends, schema snapshots, semantic diff engine and artifact schema for Tidemark. Postgres 15+ only.",
   "license": "Apache-2.0",
   "type": "module",
