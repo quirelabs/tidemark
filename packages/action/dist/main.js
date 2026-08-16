@@ -461,7 +461,16 @@ async function fetchSample(sql, current, shadow, common, key2, stats, size2) {
       changes.push(row);
     }
   }
-  return changes.slice(0, size2);
+  if (changes.length < size2) {
+    for (const row of await fetchRows(sql, current, shadow, common, key2, size2)) {
+      if (changes.length >= size2) break;
+      const id = JSON.stringify(row.key);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      changes.push(row);
+    }
+  }
+  return changes.slice(0, size2).sort((a, b2) => compareKeys(a.key, b2.key));
 }
 function literalJson(value) {
   return `${quoteJson(JSON.stringify(value ?? null))}::jsonb`;
@@ -572,6 +581,25 @@ function sameValue(a, b2) {
   if (a === null || b2 === null) return false;
   if (typeof a !== "object" || typeof b2 !== "object") return false;
   return JSON.stringify(a) === JSON.stringify(b2);
+}
+function compareKeys(a, b2) {
+  for (let i = 0; i < Math.max(a.length, b2.length); i++) {
+    const left = a[i];
+    const right = b2[i];
+    if (left === right) continue;
+    if (left === void 0) return -1;
+    if (right === void 0) return 1;
+    const leftText = String(left);
+    const rightText = String(right);
+    const leftNumber = Number(leftText);
+    const rightNumber = Number(rightText);
+    if (leftText !== "" && rightText !== "" && !Number.isNaN(leftNumber) && !Number.isNaN(rightNumber)) {
+      if (leftNumber !== rightNumber) return leftNumber - rightNumber;
+      continue;
+    }
+    return leftText < rightText ? -1 : 1;
+  }
+  return 0;
 }
 
 // ../core/src/diff/schema-diff.ts
@@ -905,7 +933,9 @@ function classifyWarnings(schema2, tables, options = {}) {
       });
     }
   }
-  return warnings2.sort((a, b2) => rank(a) - rank(b2));
+  return warnings2.sort(
+    (a, b2) => rank(a) - rank(b2) || (b2.rowsAffected ?? -1) - (a.rowsAffected ?? -1)
+  );
 }
 function rank(warning) {
   return warning.severity === "danger" ? 0 : 1;
@@ -1049,11 +1079,11 @@ function key(table, column) {
 }
 function redactionFor(table, column, config) {
   const explicit = (config.redact ?? []).filter(
-    (rule) => matcherApplies(rule, table, column)
+    (rule2) => matcherApplies(rule2, table, column)
   );
   const last = explicit.at(-1);
   if (last !== void 0) return last.mode ?? "mask";
-  if ((config.allow ?? []).some((rule) => matcherApplies(rule, table, column))) {
+  if ((config.allow ?? []).some((rule2) => matcherApplies(rule2, table, column))) {
     return null;
   }
   const patterns = config.sensitivePatterns ?? DEFAULT_SENSITIVE_PATTERNS;
@@ -1935,9 +1965,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
   function toBuffer(q) {
     if (q.parameters.length >= 65534)
       throw Errors.generic("MAX_PARAMETERS_EXCEEDED", "Max number of parameters (65534) exceeded");
-    return q.options.simple ? bytes_default().Q().str(q.statement.string + bytes_default.N).end() : q.describeFirst ? Buffer.concat([describe2(q), Flush]) : q.prepare ? q.prepared ? prepared(q) : Buffer.concat([describe2(q), prepared(q)]) : unnamed(q);
+    return q.options.simple ? bytes_default().Q().str(q.statement.string + bytes_default.N).end() : q.describeFirst ? Buffer.concat([describe(q), Flush]) : q.prepare ? q.prepared ? prepared(q) : Buffer.concat([describe(q), prepared(q)]) : unnamed(q);
   }
-  function describe2(q) {
+  function describe(q) {
     return Buffer.concat([
       Parse(q.statement.string, q.parameters, q.statement.types, q.statement.name),
       Describe("S", q.statement.name)
@@ -3544,6 +3574,70 @@ function renderCellValue(value, column, context) {
   });
 }
 
+// ../render/src/report/columns.ts
+function describeColumnChange(before, after) {
+  const left = [];
+  const right = [];
+  if (before.dataType !== after.dataType) {
+    left.push(before.dataType);
+    right.push(after.dataType);
+  }
+  if (before.nullable !== after.nullable) {
+    left.push(before.nullable ? "NULL" : "NOT NULL");
+    right.push(after.nullable ? "NULL" : "NOT NULL");
+  }
+  if (before.default !== after.default) {
+    left.push(before.default === null ? "no default" : `default ${before.default}`);
+    right.push(after.default === null ? "no default" : `default ${after.default}`);
+  }
+  if (left.length === 0) {
+    return { before: describeColumn(before), after: describeColumn(after) };
+  }
+  return { before: left.join(" "), after: right.join(" ") };
+}
+function describeColumn(column) {
+  let text = column.dataType;
+  if (!column.nullable) text += " not null";
+  if (column.default !== null) text += ` default ${column.default}`;
+  return text;
+}
+
+// ../render/src/report/sample.ts
+function signature(cell2) {
+  return JSON.stringify([
+    cell2.before ?? null,
+    cell2.after ?? null,
+    cell2.redacted ?? null
+  ]);
+}
+function collapseUniformColumns(rows) {
+  if (rows.length < 2) return { rows: [...rows], collapsed: [] };
+  const first = rows[0];
+  if (first === void 0) return { rows: [...rows], collapsed: [] };
+  const uniform = /* @__PURE__ */ new Set();
+  for (const cell2 of first.cells) {
+    const target = signature(cell2);
+    const everywhere = rows.every((row) => {
+      const match = row.cells.find((c) => c.column === cell2.column);
+      return match !== void 0 && signature(match) === target;
+    });
+    if (everywhere) uniform.add(cell2.column);
+  }
+  if (uniform.size === 0 || uniform.size === first.cells.length) {
+    return { rows: [...rows], collapsed: [] };
+  }
+  return {
+    rows: rows.map((row) => ({
+      ...row,
+      cells: row.cells.filter((cell2) => !uniform.has(cell2.column))
+    })),
+    collapsed: [...uniform].sort()
+  };
+}
+function collapsedNote(collapsed, total) {
+  return `${collapsed.join(", ")} moved identically on all ${total} sampled rows`;
+}
+
 // ../render/src/report/report.ts
 var NUMBER = new Intl.NumberFormat("en-US");
 
@@ -3653,14 +3747,15 @@ function alteredLines(table) {
     lines.push(`!   RENAMED FROM ${ref2(table.renamedFrom)}`);
   }
   for (const column of table.columnsAdded) {
-    lines.push(`+   ADD COLUMN ${column.name} ${describe(column)}`);
+    lines.push(`+   ADD COLUMN ${column.name} ${describeColumn(column)}`);
   }
   for (const column of table.columnsRemoved) {
     lines.push(`-   DROP COLUMN ${column.name}`);
   }
   for (const column of table.columnsAltered) {
+    const change = describeColumnChange(column.before, column.after);
     lines.push(
-      `!   ALTER COLUMN ${column.name} ${describe(column.before)} -> ${describe(column.after)}`
+      `!   ALTER COLUMN ${column.name} ${change.before} -> ${change.after}`
     );
   }
   for (const constraint of table.constraintsAdded) {
@@ -3676,12 +3771,6 @@ function alteredLines(table) {
     lines.push(`-   DROP INDEX ${index.name}`);
   }
   return lines;
-}
-function describe(column) {
-  let text = column.dataType;
-  if (!column.nullable) text += " NOT NULL";
-  if (column.default !== null) text += ` DEFAULT ${column.default}`;
-  return text;
 }
 function tableBlock(table) {
   const counts = [];
@@ -3716,10 +3805,14 @@ function aggregateBody(table) {
   }
   if (table.sample.length > 0) {
     const shown = table.sample.slice(0, MAX_SAMPLE_ROWS);
+    const { rows, collapsed } = collapseUniformColumns(shown);
     sections.push(
       `Sample, ${count(shown.length)} of ${count(totalRows(table))} changed rows:`
     );
-    sections.push(rowTable(shown, table));
+    sections.push(rowTable(rows, table));
+    if (collapsed.length > 0) {
+      sections.push(`_${escapeText(collapsedNote(collapsed, shown.length))}._`);
+    }
   }
   return sections.join("\n\n");
 }
@@ -3781,6 +3874,21 @@ function countSchemaChanges(artifact) {
     0
   );
 }
+
+// ../render/src/tui/outline.ts
+var NUMBER2 = new Intl.NumberFormat("en-US");
+
+// ../render/src/tui/screen.ts
+var ESC = "\x1B";
+var ALT_SCREEN_ON = `${ESC}[?1049h`;
+var ALT_SCREEN_OFF = `${ESC}[?1049l`;
+var CURSOR_HIDE = `${ESC}[?25l`;
+var CURSOR_SHOW = `${ESC}[?25h`;
+var CLEAR = `${ESC}[2J`;
+var CLEAR_LINE = `${ESC}[K`;
+
+// ../render/src/tui/app.ts
+var NUMBER3 = new Intl.NumberFormat("en-US");
 
 // src/github.ts
 var PAGE_SIZE = 100;

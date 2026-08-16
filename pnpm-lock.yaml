@@ -26,6 +26,9 @@ importers:
       '@quirelabs/tidemark-core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@quirelabs/tidemark-render':
+        specifier: workspace:*
+        version: link:../../packages/render
       tidemark-action:
         specifier: workspace:*
         version: link:../../packages/action

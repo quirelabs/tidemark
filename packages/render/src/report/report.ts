@@ -3,25 +3,37 @@ import type {
   AlteredTable,
   Artifact,
   ColumnChangeStat,
-  ColumnDefinition,
   NamedDefinition,
   RowChange,
   TableDataDiff,
   TableRef,
   Warning,
+  WarningSeverity,
 } from "@quirelabs/tidemark-core";
 import { isNotablePii } from "@quirelabs/tidemark-core";
 import type { Capabilities } from "../style/capabilities.ts";
-import { lineWidth, pad, span, type Line, type Span } from "../style/style.ts";
+import {
+  lineWidth,
+  pad,
+  span,
+  type Line,
+  type Span,
+  type StyleName,
+} from "../style/style.ts";
+import { bar, percent, rule } from "../text/bar.ts";
 import { stringWidth } from "../text/width.ts";
 import { cellSpans, valueSpan, type CellContext } from "./cells.ts";
+import { describeColumn, describeColumnChange } from "./columns.ts";
 import { glyphsFor, type Glyphs } from "./glyphs.ts";
+import { collapseUniformColumns, collapsedNote } from "./sample.ts";
 
 const NUMBER = new Intl.NumberFormat("en-US");
-const MAX_TRANSITIONS_SHOWN = 2;
 const DEFAULT_HEIGHT = 40;
 /** Never collapse below this, otherwise "auto" hides everything on a small term. */
-const MIN_DATA_LINES = 8;
+const MIN_DATA_LINES = 10;
+/** Cells given to a proportion bar. Wide enough that a 1% slice still shows. */
+const SHARE_BAR = 22;
+const STAT_BAR = 18;
 
 export interface ReportOptions {
   /**
@@ -43,11 +55,12 @@ export function renderReport(
   const width = capabilities.width;
 
   const lines: Line[] = [];
-  lines.push(...header(artifact, glyphs));
+  lines.push(header(artifact, glyphs));
   lines.push([]);
   lines.push(...summary(artifact, glyphs, width));
-  lines.push(...warnings(artifact.warnings, glyphs, width));
-  lines.push(...schemaSection(artifact, glyphs));
+  lines.push(...findings(artifact, "danger", glyphs, capabilities));
+  lines.push(...findings(artifact, "caution", glyphs, capabilities));
+  lines.push(...schemaSection(artifact, glyphs, capabilities));
 
   const budget =
     detail === "auto"
@@ -63,19 +76,17 @@ function ref(table: TableRef): string {
   return `${table.schema}.${table.name}`;
 }
 
-function header(artifact: Artifact, glyphs: Glyphs): Line[] {
+function header(artifact: Artifact, glyphs: Glyphs): Line {
   const { meta } = artifact;
   const sep = span(` ${glyphs.separator} `, "muted");
   return [
-    [
-      span("tidemark", "heading"),
-      sep,
-      span(meta.database),
-      sep,
-      span(`${meta.backend} backend`, "muted"),
-      sep,
-      span(meta.capturedTo, "muted"),
-    ],
+    span("tidemark", "heading"),
+    span("  "),
+    span(meta.database),
+    sep,
+    span(`${meta.backend} backend`, "muted"),
+    sep,
+    span(meta.capturedTo, "muted"),
   ];
 }
 
@@ -83,45 +94,48 @@ function summary(artifact: Artifact, glyphs: Glyphs, width: number): Line[] {
   const counts = totals(artifact);
   const parts: Span[][] = [];
 
-  const tableCount = artifact.tables.length;
-  if (tableCount > 0) {
-    parts.push([span(`${NUMBER.format(tableCount)} ${plural(tableCount, "table")}`)]);
+  if (artifact.tables.length > 0) {
+    const n = artifact.tables.length;
+    parts.push([span(`${NUMBER.format(n)} ${plural(n, "table")}`)]);
   }
+
+  const ops: Span[] = [];
   if (counts.inserted > 0) {
-    parts.push([span(`${glyphs.insert}${NUMBER.format(counts.inserted)}`, "insert")]);
+    ops.push(span(`${glyphs.insert}${NUMBER.format(counts.inserted)}`, "insert"));
   }
   if (counts.updated > 0) {
-    parts.push([span(`${glyphs.update}${NUMBER.format(counts.updated)}`, "update")]);
+    if (ops.length > 0) ops.push(span(" "));
+    ops.push(span(`${glyphs.update}${NUMBER.format(counts.updated)}`, "update"));
   }
   if (counts.deleted > 0) {
-    parts.push([span(`${glyphs.delete}${NUMBER.format(counts.deleted)}`, "delete")]);
+    if (ops.length > 0) ops.push(span(" "));
+    ops.push(span(`${glyphs.delete}${NUMBER.format(counts.deleted)}`, "delete"));
   }
+  if (ops.length > 0) parts.push(ops);
 
   const schemaChanges = countSchemaChanges(artifact);
   if (schemaChanges > 0) {
-    parts.push([
-      span(`${NUMBER.format(schemaChanges)} schema ${plural(schemaChanges, "change")}`),
-    ]);
+    parts.push([span(`${NUMBER.format(schemaChanges)} schema`)]);
   }
 
-  const warningCount = artifact.warnings.length;
-  if (warningCount > 0) {
-    const style = artifact.warnings.some((w) => w.severity === "danger")
-      ? "danger"
-      : "caution";
-    parts.push([
-      span(
-        `${glyphs.warn} ${NUMBER.format(warningCount)} ${plural(warningCount, "warning")}`,
-        style,
-      ),
-    ]);
+  const dangers = artifact.warnings.filter((w) => w.severity === "danger").length;
+  const cautions = artifact.warnings.length - dangers;
+  const findingSpans: Span[] = [];
+  if (dangers > 0) {
+    findingSpans.push(span(`${glyphs.warn} ${NUMBER.format(dangers)} danger`, "danger"));
   }
+  if (cautions > 0) {
+    if (findingSpans.length > 0) findingSpans.push(span(" "));
+    findingSpans.push(span(`${NUMBER.format(cautions)} caution`, "caution"));
+  }
+  if (findingSpans.length > 0) parts.push(findingSpans);
 
   if (parts.length === 0) return [[span("  "), span("no changes", "muted")]];
+  return wrapParts(parts, ` ${glyphs.separator} `, width);
+}
 
-  // The summary is the one line a reviewer always reads, so it wraps onto a
-  // second line rather than running past the edge of the terminal.
-  const separator = ` ${glyphs.separator} `;
+/** The summary is the one line always read, so it wraps rather than overflowing. */
+function wrapParts(parts: Span[][], separator: string, width: number): Line[] {
   const lines: Line[] = [];
   let current: Line = [span("  ")];
   let used = 2;
@@ -129,17 +143,13 @@ function summary(artifact: Artifact, glyphs: Glyphs, width: number): Line[] {
   for (const part of parts) {
     const partWidth = part.reduce((sum, s) => sum + stringWidth(s.text), 0);
     const needsSeparator = current.length > 1;
-    const cost = partWidth + (needsSeparator ? separator.length : 0);
 
-    if (needsSeparator && used + cost > width) {
+    if (needsSeparator && used + partWidth + separator.length > width) {
       lines.push(current);
-      current = [span("  ")];
-      used = 2;
-      current.push(...part);
-      used += partWidth;
+      current = [span("  "), ...part];
+      used = 2 + partWidth;
       continue;
     }
-
     if (needsSeparator) {
       current.push(span(separator, "muted"));
       used += separator.length;
@@ -152,36 +162,90 @@ function summary(artifact: Artifact, glyphs: Glyphs, width: number): Line[] {
   return lines;
 }
 
-function warnings(list: readonly Warning[], glyphs: Glyphs, width: number): Line[] {
+function findings(
+  artifact: Artifact,
+  severity: WarningSeverity,
+  glyphs: Glyphs,
+  capabilities: Capabilities,
+): Line[] {
+  const list = artifact.warnings.filter((w) => w.severity === severity);
   if (list.length === 0) return [];
 
-  const lines: Line[] = [[], [span("WARNINGS", "heading")]];
+  const width = capabilities.width;
+  const style: StyleName = severity === "danger" ? "danger" : "caution";
+  const lines: Line[] = [
+    [],
+    [span(rule(severity.toUpperCase(), width, capabilities.glyphs), style)],
+  ];
+
   for (const warning of list) {
-    const style = warning.severity === "danger" ? "danger" : "caution";
     const right: Line =
       warning.rowsAffected === undefined
         ? []
         : [span(`${NUMBER.format(warning.rowsAffected)} rows`, "muted")];
 
-    // A warning is the most important line in the report, so it wraps rather
-    // than truncating. Losing the tail of a danger message is not acceptable.
-    const indent = 4;
-    const available = width - indent - lineWidth(right) - (right.length > 0 ? 2 : 0);
+    // A finding never truncates. Losing the tail of a danger message is not an
+    // acceptable trade for a tidy column.
+    const available = width - 2 - lineWidth(right) - (right.length > 0 ? 2 : 0);
     const segments = wrapText(warning.message, available);
 
     segments.forEach((segment, index) => {
-      const head: Line =
-        index === 0
-          ? [span("  "), span(glyphs.warn, style), span(" ")]
-          : [span(" ".repeat(indent))];
-      const body: Line = [...head, span(segment, style)];
+      const body: Line = [span("  "), span(segment, style)];
       lines.push(index === 0 ? justify(body, right, width) : body);
     });
+
+    const radius = blastRadius(warning, artifact, capabilities);
+    if (radius.length > 0) {
+      // Set apart, so the bar clearly belongs to the finding above it rather
+      // than floating between two of them.
+      lines.push(...radius, []);
+    }
   }
   return lines;
 }
 
-/** Word wrap. A single word wider than the budget overflows rather than breaks. */
+/**
+ * The share of the table a finding touched, drawn under the finding itself.
+ * Every row of a table changing is categorically different from a hundred rows
+ * changing, and that difference should be visible before it is read.
+ */
+function blastRadius(
+  warning: Warning,
+  artifact: Artifact,
+  capabilities: Capabilities,
+): Line[] {
+  if (warning.table === undefined || warning.rowsAffected === undefined) return [];
+
+  const table = artifact.tables.find(
+    (t) => t.schema === warning.table?.schema && t.name === warning.table.name,
+  );
+  if (table === undefined || table.rowsBefore <= 0) return [];
+
+  const affected = warning.rowsAffected;
+  const drawn = bar(affected, table.rowsBefore, SHARE_BAR, capabilities.glyphs);
+  if (drawn === "") return [];
+
+  return [
+    [
+      span("  "),
+      span(drawn, shareStyle(affected / table.rowsBefore)),
+      span(" ".repeat(Math.max(1, SHARE_BAR - stringWidth(drawn) + 2))),
+      span(
+        `${NUMBER.format(affected)} of ${NUMBER.format(table.rowsBefore)} rows`,
+        "muted",
+      ),
+      span("  "),
+      span(percent(affected, table.rowsBefore), shareStyle(affected / table.rowsBefore)),
+    ],
+  ];
+}
+
+function shareStyle(fraction: number): StyleName {
+  if (fraction >= 1) return "danger";
+  if (fraction >= 0.5) return "caution";
+  return "muted";
+}
+
 function wrapText(text: string, width: number): string[] {
   if (width <= 0) return [text];
 
@@ -200,7 +264,11 @@ function wrapText(text: string, width: number): string[] {
   return lines;
 }
 
-function schemaSection(artifact: Artifact, glyphs: Glyphs): Line[] {
+function schemaSection(
+  artifact: Artifact,
+  glyphs: Glyphs,
+  capabilities: Capabilities,
+): Line[] {
   const { tablesAdded, tablesRemoved, tablesAltered } = artifact.schema;
   if (
     tablesAdded.length === 0 &&
@@ -210,7 +278,10 @@ function schemaSection(artifact: Artifact, glyphs: Glyphs): Line[] {
     return [];
   }
 
-  const lines: Line[] = [[], [span("SCHEMA", "heading")]];
+  const lines: Line[] = [
+    [],
+    [span(rule("SCHEMA", capabilities.width, capabilities.glyphs), "muted")],
+  ];
 
   for (const table of tablesAdded) {
     lines.push([span("  "), span(glyphs.insert, "insert"), span(` ${ref(table)}`)]);
@@ -229,19 +300,19 @@ function alteredTableLines(table: AlteredTable, glyphs: Glyphs): Line[] {
   const lines: Line[] = [];
   const indent = span("      ");
 
-  const columnNames = [
+  const names = [
     ...table.columnsAdded.map((c) => c.name),
     ...table.columnsRemoved.map((c) => c.name),
     ...table.columnsAltered.map((c) => c.name),
   ];
-  const nameWidth = maxWidth(columnNames);
+  const nameWidth = maxWidth(names);
 
   for (const column of table.columnsAdded) {
     lines.push([
       indent,
       span(glyphs.insert, "insert"),
       span(" "),
-      span(padText(column.name, nameWidth)),
+      span(column.name.padEnd(nameWidth)),
       span("  "),
       span(describeColumn(column), "muted"),
     ]);
@@ -251,21 +322,22 @@ function alteredTableLines(table: AlteredTable, glyphs: Glyphs): Line[] {
       indent,
       span(glyphs.delete, "delete"),
       span(" "),
-      span(padText(column.name, nameWidth)),
+      span(column.name.padEnd(nameWidth)),
       span("  "),
       span(describeColumn(column), "muted"),
     ]);
   }
   for (const column of table.columnsAltered) {
+    const change = describeColumnChange(column.before, column.after);
     lines.push([
       indent,
       span(glyphs.update, "update"),
       span(" "),
-      span(padText(column.name, nameWidth)),
+      span(column.name.padEnd(nameWidth)),
       span("  "),
-      span(describeColumn(column.before), "muted"),
+      span(change.before, "muted"),
       span(` ${glyphs.arrow} `),
-      span(describeColumn(column.after), "muted"),
+      span(change.after, "muted"),
     ]);
   }
 
@@ -281,7 +353,7 @@ function alteredTableLines(table: AlteredTable, glyphs: Glyphs): Line[] {
 function definitionLines(
   definitions: readonly NamedDefinition[],
   glyph: string,
-  style: "insert" | "delete",
+  style: StyleName,
   indent: Span,
 ): Line[] {
   return definitions.map((definition) => [
@@ -294,13 +366,6 @@ function definitionLines(
   ]);
 }
 
-function describeColumn(column: ColumnDefinition): string {
-  let text = column.dataType;
-  if (!column.nullable) text += " not null";
-  if (column.default !== null) text += ` default ${column.default}`;
-  return text;
-}
-
 function dataSection(
   artifact: Artifact,
   capabilities: Capabilities,
@@ -310,11 +375,14 @@ function dataSection(
 ): Line[] {
   if (artifact.tables.length === 0) return [];
 
-  const lines: Line[] = [[], [span("DATA", "heading")]];
+  const lines: Line[] = [
+    [],
+    [span(rule("DATA", capabilities.width, capabilities.glyphs), "muted")],
+  ];
   let collapsed = 0;
 
   for (const table of artifact.tables) {
-    const head = tableHeading(table, glyphs, capabilities.width);
+    const head = tableHeading(table, glyphs, capabilities);
     if (detail === "summary") {
       lines.push(head);
       continue;
@@ -341,27 +409,46 @@ function dataSection(
   return lines;
 }
 
-function tableHeading(table: TableDataDiff, glyphs: Glyphs, width: number): Line {
+/**
+ * Name on the left, then what happened, then the share of the table it touched.
+ * Inserts are deliberately not part of the share: adding rows to a table is not
+ * the same kind of event as rewriting the ones already in it.
+ */
+function tableHeading(
+  table: TableDataDiff,
+  glyphs: Glyphs,
+  capabilities: Capabilities,
+): Line {
   const left: Line = [span("  "), span(ref(table), "key")];
-  const parts: Span[] = [];
+  const right: Line = [];
 
   if (table.counts.inserted > 0) {
-    parts.push(span(`${glyphs.insert}${NUMBER.format(table.counts.inserted)}`, "insert"));
+    right.push(span(`${glyphs.insert}${NUMBER.format(table.counts.inserted)}`, "insert"));
   }
   if (table.counts.updated > 0) {
-    parts.push(span(`${glyphs.update}${NUMBER.format(table.counts.updated)}`, "update"));
+    if (right.length > 0) right.push(span(" "));
+    right.push(span(`${glyphs.update}${NUMBER.format(table.counts.updated)}`, "update"));
   }
   if (table.counts.deleted > 0) {
-    parts.push(span(`${glyphs.delete}${NUMBER.format(table.counts.deleted)}`, "delete"));
+    if (right.length > 0) right.push(span(" "));
+    right.push(span(`${glyphs.delete}${NUMBER.format(table.counts.deleted)}`, "delete"));
   }
-  if (table.detail === "aggregate") parts.push(span("aggregated", "muted"));
 
-  // Separators between parts only, so every heading ends at the same column.
-  const right: Line = parts.flatMap((part, index) =>
-    index === 0 ? [part] : [span(" "), part],
-  );
+  const touched = table.counts.updated + table.counts.deleted;
+  if (table.rowsBefore > 0 && touched > 0) {
+    const fraction = touched / table.rowsBefore;
+    right.push(span(` of ${NUMBER.format(table.rowsBefore)}`, "muted"));
+    right.push(span("  "));
+    right.push(span(percent(touched, table.rowsBefore).padStart(4), shareStyle(fraction)));
+    right.push(span(" "));
+    right.push(
+      span(bar(touched, table.rowsBefore, 8, capabilities.glyphs), shareStyle(fraction)),
+    );
+  } else if (table.rowsBefore === 0) {
+    right.push(span("  new table", "muted"));
+  }
 
-  return justify(left, right, width);
+  return justify(left, right, capabilities.width);
 }
 
 function tableBody(
@@ -372,88 +459,113 @@ function tableBody(
   const context: CellContext = {
     columns: table.columns,
     glyphs: capabilities.glyphs,
-    // Leave room for the op glyph, key and indentation before the value starts.
     maxWidth: Math.max(12, Math.floor(capabilities.width / 3)),
   };
 
   if (table.detail === "rows") {
     return rowLines(table.rows, table.primaryKey, context, glyphs);
   }
-  return aggregateLines(table, context, glyphs);
+  return aggregateLines(table, context, glyphs, capabilities);
 }
 
 function aggregateLines(
   table: AggregateDiff,
   context: CellContext,
   glyphs: Glyphs,
+  capabilities: Capabilities,
 ): Line[] {
   const lines: Line[] = [];
 
   if (table.statement !== undefined) {
-    lines.push([span("      "), span(table.statement, "muted")]);
+    lines.push([span("    "), span(table.statement, "muted")]);
   }
 
   const nameWidth = maxWidth(table.columnStats.map((s) => s.column));
+  const countWidth = Math.max(
+    ...table.columnStats.flatMap((s) => [
+      NUMBER.format(s.changed).length,
+      ...s.transitions.map((t) => NUMBER.format(t.count).length),
+    ]),
+    1,
+  );
+
   for (const stat of table.columnStats) {
-    lines.push([
-      span("      "),
-      span(padText(stat.column, nameWidth)),
-      span("  "),
-      span(`${NUMBER.format(stat.changed)} rows`, "muted"),
-      span("  "),
-      ...statSpans(stat, context, glyphs),
-    ]);
+    lines.push(...statLines(stat, nameWidth, countWidth, context, glyphs, capabilities));
   }
 
   if (table.sample.length > 0) {
     const total = table.counts.inserted + table.counts.updated + table.counts.deleted;
+    const { rows, collapsed } = collapseUniformColumns(table.sample);
+
+    lines.push([]);
     lines.push([
-      span("      "),
+      span("    "),
       span(
         `sample, ${NUMBER.format(table.sample.length)} of ${NUMBER.format(total)} rows`,
         "muted",
       ),
     ]);
-    lines.push(
-      ...rowLines(table.sample, table.primaryKey, context, glyphs, "        "),
-    );
+    lines.push(...rowLines(rows, table.primaryKey, context, glyphs, "      "));
+
+    if (collapsed.length > 0) {
+      lines.push([
+        span("      "),
+        span(collapsedNote(collapsed, table.sample.length), "muted"),
+      ]);
+    }
   }
   return lines;
 }
 
-function statSpans(
+/**
+ * One line per transition, each with a bar scaled within the column. This is
+ * where the shape of a bulk change becomes visible: 13,991 rows moving one way
+ * and 212 moving another is a different event from 14,203 moving together.
+ */
+function statLines(
   stat: ColumnChangeStat,
+  nameWidth: number,
+  countWidth: number,
   context: CellContext,
   glyphs: Glyphs,
-): Span[] {
+  capabilities: Capabilities,
+): Line[] {
+  const blank = " ".repeat(nameWidth);
+
   if (stat.transitions.length === 0) {
-    const distinct = stat.distinctAfter;
+    const description =
+      stat.distinctAfter === undefined
+        ? "values vary"
+        : `${NUMBER.format(stat.distinctAfter)} distinct values`;
     return [
-      span(
-        distinct === undefined
-          ? "values vary"
-          : `${NUMBER.format(distinct)} distinct values`,
-        "muted",
-      ),
+      [
+        span("    "),
+        span(stat.column.padEnd(nameWidth)),
+        span("  "),
+        span(NUMBER.format(stat.changed).padStart(countWidth), "muted"),
+        span("  "),
+        span(bar(1, 1, STAT_BAR, capabilities.glyphs), "muted"),
+        span("  "),
+        span(description, "muted"),
+      ],
     ];
   }
 
-  const spans: Span[] = [];
-  const shown = stat.transitions.slice(0, MAX_TRANSITIONS_SHOWN);
-  shown.forEach((transition, index) => {
-    if (index > 0) spans.push(span(", ", "muted"));
-    spans.push(
+  return stat.transitions.map((transition, index) => {
+    const drawn = bar(transition.count, stat.changed, STAT_BAR, capabilities.glyphs);
+    return [
+      span("    "),
+      span(index === 0 ? stat.column.padEnd(nameWidth) : blank),
+      span("  "),
+      span(NUMBER.format(transition.count).padStart(countWidth), "muted"),
+      span("  "),
+      span(drawn, "update"),
+      span(" ".repeat(Math.max(1, STAT_BAR - stringWidth(drawn) + 2))),
       valueSpan(transition.before, stat.column, context),
       span(` ${glyphs.arrow} `),
       valueSpan(transition.after, stat.column, context),
-    );
+    ];
   });
-  if (stat.transitions.length > shown.length) {
-    spans.push(
-      span(` and ${NUMBER.format(stat.transitions.length - shown.length)} more`, "muted"),
-    );
-  }
-  return spans;
 }
 
 function rowLines(
@@ -473,7 +585,7 @@ function rowLines(
         : row.op === "delete"
           ? glyphs.delete
           : glyphs.update;
-    const style =
+    const style: StyleName =
       row.op === "insert" ? "insert" : row.op === "delete" ? "delete" : "update";
 
     const cells: Span[] = [];
@@ -498,7 +610,11 @@ function keySpans(
   primaryKey: readonly string[] | null,
   context: CellContext,
 ): Span[] {
-  if (primaryKey === null || primaryKey.length !== row.key.length || row.key.length === 0) {
+  if (
+    primaryKey === null ||
+    primaryKey.length !== row.key.length ||
+    row.key.length === 0
+  ) {
     return [span("(no key)", "muted")];
   }
 
@@ -526,9 +642,7 @@ function footer(artifact: Artifact, glyphs: Glyphs): Line[] {
   if (artifact.tables.length === 0) return [];
 
   const { redactions } = artifact.meta;
-  const redactedKeys = new Set(
-    redactions.map((r) => `${ref(r.table)}.${r.column}`),
-  );
+  const redactedKeys = new Set(redactions.map((r) => `${ref(r.table)}.${r.column}`));
 
   const shown: string[] = [];
   for (const table of artifact.tables) {
@@ -600,10 +714,6 @@ function justify(left: Line, right: Line, width: number): Line {
   if (right.length === 0) return left;
   const gap = width - lineWidth(left) - lineWidth(right);
   return [...left, span(gap > 1 ? " ".repeat(gap) : "  "), ...right];
-}
-
-function padText(text: string, width: number): string {
-  return text.padEnd(width);
 }
 
 function maxWidth(values: readonly string[]): number {

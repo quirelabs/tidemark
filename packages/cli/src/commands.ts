@@ -10,8 +10,10 @@ import {
 } from "@quirelabs/tidemark-core";
 import {
   emit,
+  isInteractive,
   renderMarkdown,
   renderReport,
+  TidemarkTui,
   type Capabilities,
 } from "@quirelabs/tidemark-render";
 import { loadConfig, resolveConnection } from "./config.ts";
@@ -37,6 +39,8 @@ export interface CommandContext {
   keepSnapshot?: boolean | undefined;
   format?: "terminal" | "json" | "md" | undefined;
   artifactPath?: string | undefined;
+  /** Force the stream renderer even on a terminal. */
+  plain?: boolean | undefined;
 }
 
 /** Distinct from 1 so CI can tell "tidemark broke" from "tidemark objected". */
@@ -84,8 +88,8 @@ export async function diff(context: CommandContext): Promise<number> {
     });
 
     const path = await writeArtifact(context.stateDir, artifact);
-    render(artifact, context);
     context.err(`tidemark: artifact written to ${path}`);
+    await render(artifact, context);
 
     if (context.keepSnapshot !== true) {
       await dropShadowSchema(sql, state.handle.shadowSchema);
@@ -100,7 +104,7 @@ export async function diff(context: CommandContext): Promise<number> {
 
 export async function report(context: CommandContext): Promise<number> {
   const artifact = await readArtifact(context.stateDir, context.artifactPath);
-  render(artifact, context);
+  await render(artifact, context);
   return exitFor(artifact, context.failOn ?? "none");
 }
 
@@ -144,7 +148,7 @@ function captureOptions(config: TidemarkConfig) {
   };
 }
 
-function render(artifact: Artifact, context: CommandContext): void {
+async function render(artifact: Artifact, context: CommandContext): Promise<void> {
   if (context.format === "json") {
     context.out(JSON.stringify(artifact, null, 2));
     return;
@@ -153,8 +157,15 @@ function render(artifact: Artifact, context: CommandContext): void {
     context.out(renderMarkdown(artifact));
     return;
   }
-  const options =
-    context.detail === undefined ? {} : { detail: context.detail };
+
+  // A terminal gets the browser, anything else gets the stream. CI has no TTY,
+  // so it never reaches the interactive path by accident.
+  if (context.plain !== true && isInteractive(context.capabilities)) {
+    await new TidemarkTui(artifact, { capabilities: context.capabilities }).run();
+    return;
+  }
+
+  const options = context.detail === undefined ? {} : { detail: context.detail };
   context.out(emit(renderReport(artifact, context.capabilities, options), context.capabilities));
 }
 

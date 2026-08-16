@@ -21,6 +21,7 @@ export {
 export type { Capabilities, DetectOptions } from "./style/capabilities.ts";
 
 export { emit, lineText, lineWidth, pad, span } from "./style/style.ts";
+export { bar, percent, rule } from "./text/bar.ts";
 export type { Line, Span, StyleName } from "./style/style.ts";
 
 export { renderReport } from "./report/report.ts";
@@ -29,3 +30,11 @@ export { COMMENT_MARKER, renderMarkdown } from "./report/markdown.ts";
 export type { MarkdownOptions } from "./report/markdown.ts";
 export { glyphsFor } from "./report/glyphs.ts";
 export type { Glyphs } from "./report/glyphs.ts";
+
+export { TidemarkTui, isInteractive } from "./tui/app.ts";
+export type { TuiOptions } from "./tui/app.ts";
+export { Screen } from "./tui/screen.ts";
+export { parseKeys } from "./tui/keys.ts";
+export type { Key, KeyName } from "./tui/keys.ts";
+export { buildOutline, visibleRows } from "./tui/outline.ts";
+export type { OutlineNode } from "./tui/outline.ts";

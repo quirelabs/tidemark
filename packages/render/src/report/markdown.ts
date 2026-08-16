@@ -11,6 +11,8 @@ import type {
 } from "@quirelabs/tidemark-core";
 import { isNotablePii } from "@quirelabs/tidemark-core";
 import { renderCellValue, type CellContext } from "./cells.ts";
+import { describeColumn, describeColumnChange } from "./columns.ts";
+import { collapseUniformColumns, collapsedNote } from "./sample.ts";
 
 /**
  * Markdown for a pull request comment, built from the artifact and nothing else.
@@ -180,14 +182,15 @@ function alteredLines(table: AlteredTable): string[] {
     lines.push(`!   RENAMED FROM ${ref(table.renamedFrom)}`);
   }
   for (const column of table.columnsAdded) {
-    lines.push(`+   ADD COLUMN ${column.name} ${describe(column)}`);
+    lines.push(`+   ADD COLUMN ${column.name} ${describeColumn(column)}`);
   }
   for (const column of table.columnsRemoved) {
     lines.push(`-   DROP COLUMN ${column.name}`);
   }
   for (const column of table.columnsAltered) {
+    const change = describeColumnChange(column.before, column.after);
     lines.push(
-      `!   ALTER COLUMN ${column.name} ${describe(column.before)} -> ${describe(column.after)}`,
+      `!   ALTER COLUMN ${column.name} ${change.before} -> ${change.after}`,
     );
   }
   for (const constraint of table.constraintsAdded) {
@@ -205,12 +208,6 @@ function alteredLines(table: AlteredTable): string[] {
   return lines;
 }
 
-function describe(column: ColumnDefinition): string {
-  let text = column.dataType;
-  if (!column.nullable) text += " NOT NULL";
-  if (column.default !== null) text += ` DEFAULT ${column.default}`;
-  return text;
-}
 
 function tableBlock(table: TableDataDiff): string {
   const counts: string[] = [];
@@ -261,10 +258,16 @@ function aggregateBody(table: AggregateDiff): string {
 
   if (table.sample.length > 0) {
     const shown = table.sample.slice(0, MAX_SAMPLE_ROWS);
+    const { rows, collapsed } = collapseUniformColumns(shown);
+
     sections.push(
       `Sample, ${count(shown.length)} of ${count(totalRows(table))} changed rows:`,
     );
-    sections.push(rowTable(shown, table));
+    sections.push(rowTable(rows, table));
+
+    if (collapsed.length > 0) {
+      sections.push(`_${escapeText(collapsedNote(collapsed, shown.length))}._`);
+    }
   }
 
   return sections.join("\n\n");

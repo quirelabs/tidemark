@@ -20,7 +20,7 @@ ${styleText("bold", "tidemark")} ${styleText("dim", TIDEMARK_VERSION)}
 
 ${styleText("bold", "Commands")}
   snapshot              Record the baseline and start capturing
-  diff                  Stop capturing, build the artifact, render it
+  diff                  Stop capturing, build the artifact, browse it
   report                Re-render an artifact that already exists
   branch <name> <from>  Create a scratch database from a template
 
@@ -30,6 +30,7 @@ ${styleText("bold", "Options")}
       --format <fmt>       terminal, json or md, default terminal
       --detail <level>     auto, summary or full, default auto
       --fail-on <level>    none, warnings or danger, default none
+      --plain              Stream the report instead of opening the browser
       --keep-snapshot      Leave the shadow schema and capture state in place
       --state-dir <path>   Where capture state lives, default ${STATE_DIR}
       --artifact <path>    Artifact to read, for report
@@ -67,6 +68,7 @@ export async function run(argv: string[]): Promise<number> {
       detail: { type: "string" },
       "fail-on": { type: "string" },
       "keep-snapshot": { type: "boolean" },
+      plain: { type: "boolean" },
       "state-dir": { type: "string" },
       artifact: { type: "string" },
     },
@@ -96,6 +98,7 @@ export async function run(argv: string[]): Promise<number> {
     detail: oneOf(values.detail, DETAILS, "detail"),
     failOn: oneOf(values["fail-on"], FAIL_ON, "fail-on"),
     keepSnapshot: values["keep-snapshot"],
+    plain: values.plain,
     artifactPath: values.artifact,
   };
 

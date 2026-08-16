@@ -16,18 +16,38 @@ published to npm.
 ## What it catches
 
 ```
-tidemark · shop_ci · snapshot backend
+tidemark  shop_ci · snapshot backend
 
-  2 tables · +1 · ~14,204 · 3 schema changes · ⚠ 5 warnings
+  2 tables · +1 ~14,204 · 3 schema · ⚠ 4 danger 1 caution
 
-WARNINGS
-  ⚠ DROP COLUMN public.users.legacy_ref
-  ⚠ every row updated on public.orders, which usually means UPDATE   14,203 rows
-    without WHERE
-  ⚠ credential column changed on public.users: password_hash
-  ⚠ public.users contains values that can forge or hide output: note
-  ⚠ public.orders.status narrowed from character varying(20) to character varying(10)
+━━ DANGER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  every row updated on public.orders, which usually means UPDATE  14,203 rows
+  ██████████████████████  14,203 of 14,203 rows  100%
+
+  DROP COLUMN public.users.legacy_ref
+  credential column changed on public.users: password_hash
+  public.users contains values that can forge or hide output: note
+
+━━ DATA ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  public.orders                              ~14,203 of 14,203  100% ████████
+    status      14,061  █████████████████▉  pending → processed
+                   142  ▏                   failed → processed
+    updated_at  14,203  ██████████████████  identical, folded
+
+    sample, 10 of 14,203 rows
+      ~ id=1    status pending → processed
+      ~ id=100  status failed → processed
+      updated_at moved identically on all 10 sampled rows
+
+  public.users                                        +1 ~1 of 40    3% ▎
+    + id=41  email=#46480b384554  password_hash=[masked]  tier=free
+    ~ id=2   password_hash=[masked]
 ```
+
+"14,203 rows changed" means nothing until you know the table holds 14,203 rows.
+Every finding and every table carries the share it touched, so a full-table
+rewrite is a red bar you see before you read a word, and the shape of a bulk
+change is visible: 14,061 rows moved one way and 142 moved another.
 
 <!-- GIF PLACEHOLDER: PR comment catching the no-WHERE UPDATE on 14k rows -->
 <!-- GIF PLACEHOLDER: terminal render of a mixed schema and data diff -->
@@ -46,8 +66,31 @@ pnpm add -D @quirelabs/tidemark
 ```sh
 tidemark snapshot                 # record the baseline
 pnpm migrate                      # or let your agent do whatever it does
-tidemark diff                     # render what changed
+tidemark diff                     # browse what changed
 ```
+
+In a terminal, `diff` opens a browser: findings, schema and data as a navigable
+outline on the left, detail on the right.
+
+```
+ tidemark   shop_ci  snapshot backend
+ 2 tables  +1  ~14,204  ⚠ 4 danger  1 caution
+──────────────────────────────────────────────────────────────────────────────
+▾ DANGER  4                          │ every row updated on public.orders,
+    every row updated on public.or…  │ which usually means UPDATE without WHERE
+    DROP COLUMN public.users.legac…  │
+    credential column changed on p…  │ ████████████████████████████████
+▾ SCHEMA  3                          │ 14,203 of 14,203 rows  100%
+    + public.audit_log               │
+▾ DATA  2                            │ code     update_without_where
+    public.orders  ~14,203  100%     │ table    public.orders
+    public.users  +1 ~1  3%          │
+ ↑↓ move  → expand  J/K scroll  tab all  / search  ? help  q quit
+```
+
+`↑↓` or `jk` to move, `→` to expand, `tab` to filter, `/` to search, `?` for
+help, `q` to quit. Pipe the output anywhere, or pass `--plain`, and you get the
+stream renderer instead. CI has no terminal, so it always gets the stream.
 
 `tidemark branch scratch main_db` makes a throwaway database from a template, so
 a capture never runs against the one you care about.
