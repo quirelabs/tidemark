@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "@quirelabs/tidemark-core": "workspace:*",
-    "tidemark-action": "workspace:*"
+    "tidemark-action": "workspace:*",
+    "@quirelabs/tidemark-render": "workspace:*"
   },
   "devDependencies": {
     "@testcontainers/postgresql": "^12.1.0"

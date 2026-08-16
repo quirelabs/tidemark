@@ -498,7 +498,22 @@ async function fetchSample(
       changes.push(row);
     }
   }
-  return changes.slice(0, size);
+  // Shapes overlap when one row satisfies several of them, so dedup can leave
+  // the sample short of what was asked for. Top up from anything changed.
+  if (changes.length < size) {
+    for (const row of await fetchRows(sql, current, shadow, common, key, size)) {
+      if (changes.length >= size) break;
+      const id = JSON.stringify(row.key);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      changes.push(row);
+    }
+  }
+
+  // Stratified rows come first and the top up appends after them, which reads
+  // as an arbitrary order. Sorting by key costs nothing and the sample still
+  // covers the same shapes.
+  return changes.slice(0, size).sort((a, b) => compareKeys(a.key, b.key));
 }
 
 function literalJson(value: CellValue): string {
@@ -666,4 +681,31 @@ function sameValue(a: CellValue, b: CellValue): boolean {
   if (a === null || b === null) return false;
   if (typeof a !== "object" || typeof b !== "object") return false;
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** Keys are usually numeric, and bigint keys arrive as text to keep precision. */
+function compareKeys(a: readonly CellValue[], b: readonly CellValue[]): number {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const left = a[i];
+    const right = b[i];
+    if (left === right) continue;
+    if (left === undefined) return -1;
+    if (right === undefined) return 1;
+
+    const leftText = String(left);
+    const rightText = String(right);
+    const leftNumber = Number(leftText);
+    const rightNumber = Number(rightText);
+    if (
+      leftText !== "" &&
+      rightText !== "" &&
+      !Number.isNaN(leftNumber) &&
+      !Number.isNaN(rightNumber)
+    ) {
+      if (leftNumber !== rightNumber) return leftNumber - rightNumber;
+      continue;
+    }
+    return leftText < rightText ? -1 : 1;
+  }
+  return 0;
 }

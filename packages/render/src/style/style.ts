@@ -23,7 +23,10 @@ export type StyleName =
   | "value_boolean"
   | "value_date"
   | "value_json"
-  | "value_bytes";
+  | "value_bytes"
+  | "selected"
+  | "border"
+  | "accent";
 
 export interface Span {
   text: string;
@@ -49,6 +52,9 @@ const SGR: Readonly<Record<StyleName, string>> = {
   value_date: "34",
   value_json: "36",
   value_bytes: "2",
+  selected: "7",
+  border: "2",
+  accent: "36",
 };
 
 export function span(text: string, style?: StyleName): Span {
@@ -72,14 +78,26 @@ export function emit(lines: readonly Line[], capabilities: Capabilities): string
   return lines.map((line) => emitLine(line, capabilities)).join("\n");
 }
 
-function emitLine(line: Line, capabilities: Capabilities): string {
-  if (!capabilities.color) return lineText(line).trimEnd();
+/**
+ * `trim` is right for a stream, where trailing spaces are noise in a log, and
+ * wrong for a full screen frame, where every row must stay exactly as wide as
+ * the terminal or the frame differ compares rows that are not comparable.
+ */
+export function emitLine(
+  line: Line,
+  capabilities: Capabilities,
+  trim = true,
+): string {
+  if (!capabilities.color) {
+    const text = lineText(line);
+    return trim ? text.trimEnd() : text;
+  }
 
   let out = "";
   for (const s of line) {
     if (s.text === "") continue;
     const code = s.style === undefined ? undefined : SGR[s.style];
-    out += code === undefined ? s.text : `[${code}m${s.text}[0m`;
+    out += code === undefined ? s.text : `\u001b[${code}m${s.text}\u001b[0m`;
   }
   return out;
 }

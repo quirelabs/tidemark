@@ -1,7 +1,8 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: ["src/main.ts"],
+  // Named so the output stays dist/main.js, which action.yml points at.
+  entry: { main: "src/entry.ts" },
   format: ["esm"],
   clean: true,
   target: "node22",

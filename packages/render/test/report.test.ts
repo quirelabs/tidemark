@@ -1,3 +1,4 @@
+import type { Artifact } from "@quirelabs/tidemark-core";
 import { describe, expect, it } from "vitest";
 import {
   detectCapabilities,
@@ -22,32 +23,37 @@ function text(capabilities: Capabilities = PLAIN, options = {}): string {
 describe("report structure", () => {
   it("leads with the summary before any detail", () => {
     const lines = text().split("\n");
-    const summary = lines.findIndex((l) => l.includes("schema changes"));
-    const data = lines.findIndex((l) => l === "DATA");
+    const summary = lines.findIndex((l) => l.includes("schema"));
+    const data = lines.findIndex((l) => l.startsWith("━━ DATA"));
     expect(summary).toBeGreaterThan(-1);
+    expect(data).toBeGreaterThan(-1);
     expect(summary).toBeLessThan(data);
   });
 
-  it("puts warnings above the schema and data sections", () => {
+  it("puts findings above the schema and data sections", () => {
     const lines = text().split("\n");
-    const warnings = lines.indexOf("WARNINGS");
-    const schema = lines.indexOf("SCHEMA");
-    const data = lines.indexOf("DATA");
-    expect(warnings).toBeGreaterThan(-1);
-    expect(warnings).toBeLessThan(schema);
+    const at = (prefix: string) => lines.findIndex((l) => l.startsWith(prefix));
+    const danger = at("━━ DANGER");
+    const schema = at("━━ SCHEMA");
+    const data = at("━━ DATA");
+
+    expect(danger).toBeGreaterThan(-1);
+    expect(danger).toBeLessThan(schema);
     expect(schema).toBeLessThan(data);
   });
 
   it("counts everything in the summary line", () => {
     const summary = text()
       .split("\n")
-      .find((l) => l.includes("schema changes")) as string;
+      .find((l) => l.includes("tables")) as string;
     expect(summary).toContain("2 tables");
     expect(summary).toContain("+2");
     expect(summary).toContain("~14,204");
     expect(summary).toContain("−1");
-    expect(summary).toContain("7 schema changes");
-    expect(summary).toContain("4 warnings");
+    expect(summary).toContain("7 schema");
+    // Severity is split out, because "4 warnings" hides whether any are fatal.
+    expect(summary).toContain("3 danger");
+    expect(summary).toContain("1 caution");
   });
 
   it("renders no changes without inventing sections", () => {
@@ -66,7 +72,11 @@ describe("schema rendering", () => {
     expect(out).toContain("− public.temp_import");
     expect(out).toContain("~ public.users");
     expect(out).toContain("text not null default 'free'::text");
-    expect(out).toContain("character varying(20) → character varying(10)");
+    // Type and nullability both moved on this column, so both are named and
+    // the unchanged default is not restated on either side.
+    expect(out).toContain(
+      "character varying(20) NULL → character varying(10) NOT NULL",
+    );
     expect(out).toContain("users_tier_check");
   });
 });
@@ -81,11 +91,12 @@ describe("data rendering", () => {
 
   it("aggregates instead of listing bulk changes", () => {
     const out = text();
-    expect(out).toContain("aggregated");
-    expect(out).toContain("14,203 rows");
     expect(out).toContain("pending → processed");
     expect(out).toContain("14,203 distinct values");
     expect(out).toContain("sample, 2 of 14,203 rows");
+    // Proportion is the point: the table heading carries the share it touched.
+    expect(out).toContain("100%");
+    expect(out).toContain("of 14,203");
   });
 
   it("never lists more rows than the sample it declares", () => {
@@ -208,5 +219,164 @@ describe("ascii mode", () => {
     expect(out).not.toMatch(/[⚠→−·␀-␿…]/);
     expect(out).toContain("->");
     expect(out).toContain("\\r\\n");
+  });
+});
+
+describe("altered columns", () => {
+  it("shows only the attribute that changed, not the whole definition twice", () => {
+    const narrowed: Artifact = {
+      ...AGENT_GONE_WRONG,
+      schema: {
+        tablesAdded: [],
+        tablesRemoved: [],
+        tablesAltered: [
+          {
+            schema: "public",
+            name: "orders",
+            columnsAdded: [],
+            columnsRemoved: [],
+            columnsAltered: [
+              {
+                name: "status",
+                before: {
+                  name: "status",
+                  dataType: "character varying(20)",
+                  nullable: false,
+                  default: "'pending'::character varying",
+                },
+                after: {
+                  name: "status",
+                  dataType: "character varying(10)",
+                  nullable: false,
+                  default: "'pending'::character varying",
+                },
+              },
+            ],
+            constraintsAdded: [],
+            constraintsRemoved: [],
+            indexesAdded: [],
+            indexesRemoved: [],
+          },
+        ],
+      },
+    };
+
+    const out = emit(renderReport(narrowed, PLAIN, { detail: "full" }), PLAIN);
+    expect(out).toContain("character varying(20) → character varying(10)");
+    // The default and nullability did not move, so they are not restated.
+    expect(out).not.toContain("'pending'::character varying");
+    expect(out).not.toContain("not null →");
+  });
+
+  it("names nullability when that is what moved", () => {
+    const madeRequired: Artifact = {
+      ...AGENT_GONE_WRONG,
+      schema: {
+        tablesAdded: [],
+        tablesRemoved: [],
+        tablesAltered: [
+          {
+            schema: "public",
+            name: "users",
+            columnsAdded: [],
+            columnsRemoved: [],
+            columnsAltered: [
+              {
+                name: "tier",
+                before: { name: "tier", dataType: "text", nullable: true, default: null },
+                after: { name: "tier", dataType: "text", nullable: false, default: null },
+              },
+            ],
+            constraintsAdded: [],
+            constraintsRemoved: [],
+            indexesAdded: [],
+            indexesRemoved: [],
+          },
+        ],
+      },
+    };
+
+    const out = emit(renderReport(madeRequired, PLAIN, { detail: "full" }), PLAIN);
+    expect(out).toContain("NULL → NOT NULL");
+    expect(out).not.toContain("text → text");
+  });
+});
+
+describe("uniform sample columns", () => {
+  const STAMP: [string, string] = ["2026-08-15T21:16:10Z", "2026-08-15T21:16:11Z"];
+
+  /** status varies across rows, so only a uniform column can collapse. */
+  function bulk(rows: { status: [string, string]; stamp: [string, string] }[]): Artifact {
+    return {
+      ...AGENT_GONE_WRONG,
+      warnings: [],
+      schema: { tablesAdded: [], tablesRemoved: [], tablesAltered: [] },
+      tables: [
+        {
+          schema: "public",
+          name: "orders",
+          detail: "aggregate",
+          primaryKey: ["id"],
+          columns: [
+            { name: "id", dataType: "integer" },
+            { name: "status", dataType: "text" },
+            { name: "updated_at", dataType: "timestamp with time zone" },
+          ],
+          counts: { inserted: 0, updated: 14203, deleted: 0 },
+          rowsBefore: 14203,
+          columnStats: [],
+          sample: rows.map((r, index) => ({
+            op: "update" as const,
+            key: [index + 1],
+            cells: [
+              { column: "status", before: r.status[0], after: r.status[1] },
+              { column: "updated_at", before: r.stamp[0], after: r.stamp[1] },
+            ],
+          })),
+        },
+      ],
+    };
+  }
+
+  const VARIED = [
+    { status: ["pending", "processed"] as [string, string], stamp: STAMP },
+    { status: ["failed", "processed"] as [string, string], stamp: STAMP },
+    { status: ["queued", "processed"] as [string, string], stamp: STAMP },
+  ];
+
+  it("folds a timestamp that moved identically, and says so", () => {
+    const out = emit(renderReport(bulk(VARIED), PLAIN, { detail: "full" }), PLAIN);
+
+    expect(out).toContain("updated_at moved identically on all 3 sampled rows");
+    // The column that actually differs survives on every row.
+    expect(out).toContain("status pending → processed");
+    expect(out).toContain("status failed → processed");
+    // The repeated timestamp is gone from the rows themselves.
+    expect(out).not.toContain("updated_at 2026-08-15T21:16:10Z");
+  });
+
+  it("leaves the rows alone when nothing is uniform", () => {
+    const out = emit(
+      renderReport(
+        bulk([
+          { status: ["pending", "processed"], stamp: STAMP },
+          { status: ["failed", "processed"], stamp: ["2026-08-15T21:16:12Z", "2026-08-15T21:16:13Z"] },
+        ]),
+        PLAIN,
+        { detail: "full" },
+      ),
+      PLAIN,
+    );
+
+    expect(out).not.toContain("moved identically");
+    expect(out).toContain("updated_at 2026-08-15T21:16:10Z");
+  });
+
+  it("never collapses a row level diff, only aggregated tables", () => {
+    // public.users in the fixture is row level, under the threshold, so even a
+    // column that happens to be uniform stays on every row.
+    const out = text(PLAIN, { detail: "full" });
+    expect(out).toContain("email=ada@example.com");
+    expect(out).not.toContain("moved identically");
   });
 });

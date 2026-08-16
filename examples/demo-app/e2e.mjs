@@ -18,6 +18,11 @@ import { fileURLToPath } from "node:url";
 import { PostgreSqlContainer } from "@testcontainers/postgresql";
 import { connect } from "@quirelabs/tidemark-core";
 import { main } from "tidemark-action";
+import {
+  detectCapabilities,
+  emit,
+  renderReport,
+} from "@quirelabs/tidemark-render";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -81,6 +86,17 @@ try {
 
   const summary = await readFile(summaryPath, "utf8");
   const outputs = await readFile(outputPath, "utf8");
+
+  // The terminal renderer is the primary interface, so it leads. Rendered from
+  // the artifact the action just wrote, which is the same path `tidemark report`
+  // takes.
+  const artifact = JSON.parse(
+    await readFile(join(here, ".tidemark", "artifact.json"), "utf8"),
+  );
+  const capabilities = { ...detectCapabilities(), width: 96 };
+
+  console.log("\n--- terminal render, what `tidemark diff` shows ---\n");
+  console.log(emit(renderReport(artifact, capabilities, { detail: "full" }), capabilities));
 
   console.log("\n--- markdown the action would post ---\n");
   // Written raw, not logged, so the demo output is copy-pasteable markdown.

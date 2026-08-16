@@ -115,8 +115,12 @@ export function classifyWarnings(
     }
   }
 
-  // Danger first, then original order, so the worst news is always at the top.
-  return warnings.sort((a, b) => rank(a) - rank(b));
+  // Danger first, then by how much of the database it touched. A finding that
+  // rewrote every row outranks one that dropped a column, and both outrank
+  // anything merely cautionary.
+  return warnings.sort(
+    (a, b) => rank(a) - rank(b) || (b.rowsAffected ?? -1) - (a.rowsAffected ?? -1),
+  );
 }
 
 function rank(warning: Warning): number {
